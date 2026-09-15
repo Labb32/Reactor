@@ -151,14 +151,9 @@ impl AgentAdapter for CodexAdapter {
         );
         match policy.access {
             AccessMode::Sandbox => arguments.extend(
-                [
-                    "--ask-for-approval",
-                    "never",
-                    "--sandbox",
-                    "workspace-write",
-                ]
-                .into_iter()
-                .map(OsString::from),
+                ["--sandbox", "workspace-write"]
+                    .into_iter()
+                    .map(OsString::from),
             ),
             AccessMode::FullAccess => {
                 arguments.push("--dangerously-bypass-approvals-and-sandbox".into());
