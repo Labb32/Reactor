@@ -89,4 +89,5 @@ reactor events --after <cursor> --output jsonl
 
 - [프로젝트 기획](docs/REACTOR.md)
 - [시스템 설계](docs/SYSTEM_DESIGN.md)
+- [CLI 계약](docs/CLI_CONTRACT.md)
 - [개발 Task](tasks/README.md)

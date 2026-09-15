@@ -31,15 +31,12 @@ impl Default for ConcurrencyConfig {
 }
 
 impl Config {
-    pub fn load_or_create(path: &Path) -> Result<Self> {
-        if path.exists() {
-            return Self::load(path);
+    pub fn recover(path: &Path) -> Result<()> {
+        let backup = path.with_extension("json.bak");
+        if !path.exists() && backup.exists() {
+            fs::rename(&backup, path).map_err(|source| io_error(path, source))?;
         }
-
-        let config = Self::default();
-        config.validate()?;
-        write_new(path, &config)?;
-        Ok(config)
+        Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -53,7 +50,12 @@ impl Config {
         Ok(config)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn save(&self, path: &Path) -> Result<()> {
+        self.validate()?;
+        write_config(path, self)
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
         let values = [
             ("concurrency.global", self.concurrency.global),
             ("concurrency.per_agent", self.concurrency.per_agent),
@@ -74,7 +76,7 @@ impl Config {
     }
 }
 
-fn write_new(path: &Path, config: &Config) -> Result<()> {
+fn write_config(path: &Path, config: &Config) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io_error(path, std::io::Error::other("missing parent directory")))?;
@@ -92,7 +94,21 @@ fn write_new(path: &Path, config: &Config) -> Result<()> {
         .map_err(|source| io_error(&temporary, source))?;
     file.sync_all()
         .map_err(|source| io_error(&temporary, source))?;
-    fs::rename(&temporary, path).map_err(|source| io_error(path, source))?;
+    if !path.exists() {
+        fs::rename(&temporary, path).map_err(|source| io_error(path, source))?;
+        return Ok(());
+    }
+
+    let backup = path.with_extension("json.bak");
+    if backup.exists() {
+        fs::remove_file(&backup).map_err(|source| io_error(&backup, source))?;
+    }
+    fs::rename(path, &backup).map_err(|source| io_error(path, source))?;
+    if let Err(source) = fs::rename(&temporary, path) {
+        let _ = fs::rename(&backup, path);
+        return Err(io_error(path, source));
+    }
+    fs::remove_file(&backup).map_err(|source| io_error(&backup, source))?;
 
     Ok(())
 }
