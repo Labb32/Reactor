@@ -15,18 +15,10 @@ pub enum AccessMode {
     FullAccess,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspacePolicy {
     pub access: AccessMode,
-}
-
-impl Default for WorkspacePolicy {
-    fn default() -> Self {
-        Self {
-            access: AccessMode::Sandbox,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -88,10 +80,12 @@ pub fn validate_id(id: &str) -> Result<()> {
 pub fn fingerprint(workspace: &CanonicalWorkspace, policy: &WorkspacePolicy) -> Result<String> {
     let mut hash = blake3::Hasher::new();
     hash.update(workspace.key.as_bytes());
+    hash.update(b"\0");
     hash.update(
         &serde_json::to_vec(policy)
             .map_err(|error| ReactorError::InvalidInput(error.to_string()))?,
     );
+    hash.update(b"\0");
     for relative in ["AGENTS.md", ".codex/config.toml"] {
         let path = workspace.path.join(relative);
         match fs::read(&path) {

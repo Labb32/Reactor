@@ -20,9 +20,9 @@ impl AgentKind {
         }
     }
 
-    pub fn adapter(self) -> Box<dyn AgentAdapter> {
+    pub fn adapter(self) -> &'static dyn AgentAdapter {
         match self {
-            Self::Codex => Box::new(codex::CodexAdapter),
+            Self::Codex => &codex::CodexAdapter,
         }
     }
 }
@@ -46,5 +46,9 @@ pub trait AgentAdapter {
     fn preflight(&self, workspace: &std::path::Path) -> Result<AgentPreflight>;
 
     #[allow(dead_code)]
-    fn command(&self, workspace: &std::path::Path, policy: &WorkspacePolicy) -> AgentCommand;
+    fn command(
+        &self,
+        workspace: &std::path::Path,
+        policy: &WorkspacePolicy,
+    ) -> Result<AgentCommand>;
 }

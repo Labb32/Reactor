@@ -41,7 +41,7 @@ Reactor commands use text output by default. Automation should pass `--output js
 | `1` | Runtime, I/O, configuration, or database failure |
 | `2` | Invalid command input |
 | `3` | Database initialization or schema mismatch |
-| `4` | Cursor or idempotency conflict |
+| `4` | State, cursor, or idempotency conflict |
 
 JSON responses go to stdout. Human diagnostics go to stderr.
 

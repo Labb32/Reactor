@@ -4,7 +4,7 @@ use semver::Version;
 
 use crate::{
     agents::{AgentAdapter, AgentCommand, AgentPreflight},
-    error::{ReactorError, Result},
+    error::Result,
     workspace::{AccessMode, WorkspacePolicy},
 };
 
@@ -14,19 +14,17 @@ pub struct CodexAdapter;
 
 impl AgentAdapter for CodexAdapter {
     fn preflight(&self, workspace: &Path) -> Result<AgentPreflight> {
-        let version_output = match Command::new("codex").arg("--version").output() {
+        let Some(launcher) = Launcher::find() else {
+            return Ok(failed("not_installed"));
+        };
+        let version_output = match launcher.command(["--version"]).output() {
             Ok(output) if output.status.success() => output,
-            Ok(_) => return Ok(failed("version_check_failed")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(failed("not_installed"));
-            }
-            Err(error) => return Err(ReactorError::InvalidArgument(error.to_string())),
+            _ => return Ok(failed("version_check_failed")),
         };
         let version = String::from_utf8_lossy(&version_output.stdout)
             .split_whitespace()
             .find_map(|value| Version::parse(value).ok());
-        let minimum = Version::parse(MINIMUM_VERSION)
-            .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
+        let minimum = Version::new(0, 154, 0);
         let Some(version) = version else {
             return Ok(failed("version_unknown"));
         };
@@ -41,8 +39,8 @@ impl AgentAdapter for CodexAdapter {
             });
         }
 
-        let authenticated = Command::new("codex")
-            .args(["login", "status"])
+        let authenticated = launcher
+            .command(["login", "status"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false);
@@ -50,15 +48,15 @@ impl AgentAdapter for CodexAdapter {
             return Ok(failed_with_version("authentication_required", &version));
         }
 
-        let help = Command::new("codex")
-            .args(["exec", "--help"])
-            .output()
-            .map_err(|error| ReactorError::InvalidArgument(error.to_string()))?;
-        let help = String::from_utf8_lossy(&help.stdout);
-        let non_interactive = help.contains("--json")
-            && help.contains("--sandbox")
-            && help.contains("--ask-for-approval")
-            && help.contains("--dangerously-bypass-approvals-and-sandbox");
+        let help = match launcher.command(["exec", "--help"]).output() {
+            Ok(output) if output.status.success() => output,
+            _ => return Ok(failed_with_version("non_interactive_unsupported", &version)),
+        };
+        let help_text = String::from_utf8_lossy(&help.stdout);
+        let non_interactive = help_text.contains("--json")
+            && help_text.contains("--sandbox")
+            && help_text.contains("--ask-for-approval")
+            && help_text.contains("--dangerously-bypass-approvals-and-sandbox");
         if !non_interactive {
             return Ok(failed_with_version("non_interactive_unsupported", &version));
         }
@@ -89,11 +87,18 @@ impl AgentAdapter for CodexAdapter {
         })
     }
 
-    fn command(&self, workspace: &Path, policy: &WorkspacePolicy) -> AgentCommand {
-        let mut arguments: Vec<OsString> = ["exec", "--json", "--ephemeral", "--color", "never"]
-            .into_iter()
-            .map(OsString::from)
-            .collect();
+    fn command(&self, workspace: &Path, policy: &WorkspacePolicy) -> Result<AgentCommand> {
+        let launcher =
+            Launcher::find().ok_or_else(|| crate::error::ReactorError::AgentUnavailable {
+                agent: "codex".to_owned(),
+                reason: "not_installed".to_owned(),
+            })?;
+        let mut arguments = launcher.prefix;
+        arguments.extend(
+            ["exec", "--json", "--ephemeral", "--color", "never"]
+                .into_iter()
+                .map(OsString::from),
+        );
         match policy.access {
             AccessMode::Sandbox => arguments.extend(
                 [
@@ -112,12 +117,61 @@ impl AgentAdapter for CodexAdapter {
         arguments.push("-C".into());
         arguments.push(workspace.as_os_str().to_owned());
         arguments.push("-".into());
-        AgentCommand {
-            program: "codex".into(),
+        Ok(AgentCommand {
+            program: launcher.program,
             arguments,
             current_dir: workspace.to_owned(),
-        }
+        })
     }
+}
+
+struct Launcher {
+    program: OsString,
+    prefix: Vec<OsString>,
+}
+
+impl Launcher {
+    fn command<const N: usize>(&self, arguments: [&str; N]) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(&self.prefix).args(arguments);
+        command
+    }
+
+    #[cfg(not(windows))]
+    fn find() -> Option<Self> {
+        Some(Self {
+            program: find_on_path("codex")?,
+            prefix: Vec::new(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn find() -> Option<Self> {
+        if let Some(program) = find_on_path("codex.exe") {
+            return Some(Self {
+                program,
+                prefix: Vec::new(),
+            });
+        }
+        let script = find_on_path("codex.ps1")?;
+        Some(Self {
+            program: "powershell.exe".into(),
+            prefix: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-File".into(),
+                script,
+            ],
+        })
+    }
+}
+
+fn find_on_path(name: &str) -> Option<OsString> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.into_os_string())
 }
 
 fn failed(reason: &str) -> AgentPreflight {

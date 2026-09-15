@@ -9,7 +9,7 @@ CREATE TABLE workspaces (
     canonical_key TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL CHECK (status IN ('REGISTERED', 'READY', 'DEGRADED')),
     policy_json TEXT NOT NULL,
-    policy_fingerprint TEXT,
+    policy_fingerprint TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

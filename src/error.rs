@@ -81,6 +81,9 @@ pub enum ReactorError {
         agent: String,
         reason: String,
     },
+
+    #[error("agent {agent} is unavailable: {reason}")]
+    AgentUnavailable { agent: String, reason: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -125,7 +128,8 @@ impl ReactorError {
             | Self::IdempotencyConflict
             | Self::WorkspaceOverlap { .. }
             | Self::WorkspaceNotFound(_)
-            | Self::AgentNotReady { .. } => 4,
+            | Self::AgentNotReady { .. }
+            | Self::AgentUnavailable { .. } => 4,
             Self::UserDirectoriesUnavailable
             | Self::EmptyPathOverride { .. }
             | Self::Io { .. }
@@ -160,6 +164,7 @@ impl ReactorError {
             Self::WorkspaceOverlap { .. } => "workspace_overlap",
             Self::WorkspaceNotFound(_) => "workspace_not_found",
             Self::AgentNotReady { .. } => "agent_not_ready",
+            Self::AgentUnavailable { .. } => "agent_unavailable",
         }
     }
 
@@ -189,6 +194,9 @@ impl ReactorError {
                 "agent": agent,
                 "reason": reason
             }),
+            Self::AgentUnavailable { agent, reason } => {
+                serde_json::json!({ "agent": agent, "reason": reason })
+            }
             _ => serde_json::json!({}),
         }
     }
