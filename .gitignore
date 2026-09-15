@@ -1,0 +1,39 @@
+# Rust
+/target/
+
+# Reactor local data
+/.reactor/
+
+# APS Vault mounts
+/.brief/
+/tasks/
+
+# Agent local work
+/.agents/
+/.codex/
+/.claude/
+/.qwen/
+/.worktrees/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# Editors
+/.idea/
+/.vscode/
+
+# macOS
+.DS_Store
+._*
+
+# Windows
+Thumbs.db
+Desktop.ini
