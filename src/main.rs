@@ -1,3 +1,4 @@
+mod agents;
 mod app;
 mod cli;
 mod config;
@@ -9,6 +10,7 @@ mod output;
 mod paths;
 mod store;
 mod time;
+mod workspace;
 
 use std::process::ExitCode;
 

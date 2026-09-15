@@ -62,6 +62,25 @@ pub enum ReactorError {
 
     #[error("invalid run state transition from {from} to {to}")]
     InvalidRunTransition { from: String, to: String },
+
+    #[error("workspace ID is invalid: {0}")]
+    InvalidWorkspaceId(String),
+
+    #[error("workspace path is invalid: {0}")]
+    InvalidWorkspacePath(String),
+
+    #[error("workspace overlaps registered workspace {workspace_id}")]
+    WorkspaceOverlap { workspace_id: String },
+
+    #[error("workspace {0} was not found")]
+    WorkspaceNotFound(String),
+
+    #[error("agent {agent} is not ready for workspace {workspace_id}: {reason}")]
+    AgentNotReady {
+        workspace_id: String,
+        agent: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -94,11 +113,19 @@ impl ReactorError {
 
     pub const fn exit_code(&self) -> u8 {
         match self {
-            Self::InvalidInput(_) | Self::InvalidArgument(_) | Self::InvalidConcurrency { .. } => 2,
+            Self::InvalidInput(_)
+            | Self::InvalidArgument(_)
+            | Self::InvalidConcurrency { .. }
+            | Self::InvalidWorkspaceId(_)
+            | Self::InvalidWorkspacePath(_) => 2,
             Self::UnsupportedSchema { .. }
             | Self::UninitializedDatabase
             | Self::SchemaMigrationRequired { .. } => 3,
-            Self::CursorExpired { .. } | Self::IdempotencyConflict => 4,
+            Self::CursorExpired { .. }
+            | Self::IdempotencyConflict
+            | Self::WorkspaceOverlap { .. }
+            | Self::WorkspaceNotFound(_)
+            | Self::AgentNotReady { .. } => 4,
             Self::UserDirectoriesUnavailable
             | Self::EmptyPathOverride { .. }
             | Self::Io { .. }
@@ -128,6 +155,11 @@ impl ReactorError {
             Self::CursorExpired { .. } => "cursor_expired",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::InvalidRunTransition { .. } => "invalid_run_transition",
+            Self::InvalidWorkspaceId(_) => "invalid_workspace_id",
+            Self::InvalidWorkspacePath(_) => "invalid_workspace_path",
+            Self::WorkspaceOverlap { .. } => "workspace_overlap",
+            Self::WorkspaceNotFound(_) => "workspace_not_found",
+            Self::AgentNotReady { .. } => "agent_not_ready",
         }
     }
 
@@ -142,6 +174,21 @@ impl ReactorError {
             Self::CursorExpired { requested, oldest } => {
                 serde_json::json!({ "requested": requested, "oldest": oldest })
             }
+            Self::WorkspaceOverlap { workspace_id } => {
+                serde_json::json!({ "workspace_id": workspace_id })
+            }
+            Self::WorkspaceNotFound(workspace_id) => {
+                serde_json::json!({ "workspace_id": workspace_id })
+            }
+            Self::AgentNotReady {
+                workspace_id,
+                agent,
+                reason,
+            } => serde_json::json!({
+                "workspace_id": workspace_id,
+                "agent": agent,
+                "reason": reason
+            }),
             _ => serde_json::json!({}),
         }
     }

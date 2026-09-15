@@ -6,7 +6,9 @@ CREATE TABLE reactor_meta (
 CREATE TABLE workspaces (
     id TEXT PRIMARY KEY,
     canonical_path TEXT NOT NULL UNIQUE,
+    canonical_key TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL CHECK (status IN ('REGISTERED', 'READY', 'DEGRADED')),
+    policy_json TEXT NOT NULL,
     policy_fingerprint TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
