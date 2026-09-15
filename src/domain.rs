@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[allow(dead_code)]
 pub enum WorkspaceStatus {
     Registered,
     Ready,
@@ -12,6 +13,7 @@ pub enum WorkspaceStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[allow(dead_code)]
 pub enum PlanStatus {
     Draft,
     InReview,
@@ -72,6 +74,7 @@ impl RunState {
         )
     }
 
+    #[allow(dead_code)]
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,

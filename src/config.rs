@@ -99,6 +99,7 @@ fn write_config(path: &Path, config: &Config) -> Result<()> {
         return Ok(());
     }
 
+    // Preserve the previous file because Windows rename does not replace it.
     let backup = path.with_extension("json.bak");
     if backup.exists() {
         fs::remove_file(&backup).map_err(|source| io_error(&backup, source))?;

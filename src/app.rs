@@ -16,9 +16,7 @@ pub struct Initialization {
 }
 
 pub struct App {
-    #[allow(dead_code)]
     pub config: Config,
-    #[allow(dead_code)]
     pub store: Store,
     pub instance_id: String,
 }
@@ -59,7 +57,6 @@ impl App {
         })
     }
 
-    #[allow(dead_code)]
     pub fn open(paths: &ReactorPaths) -> Result<Self> {
         let config = Config::load(&paths.config_file())?;
         let store = Store::open_initialized(&paths.database_file())?;

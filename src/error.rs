@@ -78,7 +78,17 @@ impl ReactorError {
             code: self.code(),
             message: self.to_string(),
             details: self.context(),
-            retryable: matches!(self, Self::Database(error) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)),
+            retryable: matches!(
+                self,
+                Self::Database(error)
+                    if matches!(
+                        error.sqlite_error_code(),
+                        Some(
+                            rusqlite::ErrorCode::DatabaseBusy
+                                | rusqlite::ErrorCode::DatabaseLocked
+                        )
+                    )
+            ),
         }
     }
 

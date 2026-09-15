@@ -7,7 +7,7 @@ Reactor commands use text output by default. Automation should pass `--output js
 ```json
 {
   "schema_version": "1.0",
-  "instance_id": "0199...",
+  "instance_id": "01994ca0-0000-7000-8000-000000000000",
   "timestamp": "2026-09-15T06:00:00Z",
   "data": {}
 }
