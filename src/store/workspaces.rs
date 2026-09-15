@@ -106,19 +106,48 @@ impl Store {
         })
     }
 
+    pub fn mark_workspace_agent_degraded(
+        &mut self,
+        workspace_id: &str,
+        agent_kind: &str,
+        reason: &str,
+    ) -> Result<WorkspaceRecord> {
+        let now = crate::time::now_utc();
+        self.write_transaction(|transaction| {
+            query_workspace(transaction, workspace_id)?;
+            let changed = transaction.execute(
+                "UPDATE workspace_agents SET status = 'DEGRADED', checked_at = ?1
+                 WHERE workspace_id = ?2 AND agent_kind = ?3 AND status <> 'DEGRADED'",
+                params![now, workspace_id, agent_kind],
+            )?;
+            if changed > 0 {
+                refresh_workspace_status(transaction, workspace_id, &now)?;
+                write_event(
+                    transaction,
+                    "AGENT_DEGRADED",
+                    "workspace",
+                    workspace_id,
+                    serde_json::json!({ "agent_kind": agent_kind, "reason": reason }),
+                    &now,
+                )?;
+            }
+            query_workspace(transaction, workspace_id)
+        })
+    }
+
     #[allow(dead_code)]
     pub fn require_ready_workspace_agent(
         &self,
         workspace_id: &str,
         agent_kind: &str,
+        policy_fingerprint: &str,
     ) -> Result<()> {
         let workspace = self.get_workspace(workspace_id)?;
         let ready = workspace.status == "READY"
             && workspace.agents.iter().any(|agent| {
                 agent.agent_kind == agent_kind
                     && agent.status == "READY"
-                    && agent.policy_fingerprint.as_deref()
-                        == Some(workspace.policy_fingerprint.as_str())
+                    && agent.policy_fingerprint.as_deref() == Some(policy_fingerprint)
             });
         if !ready {
             return Err(ReactorError::AgentNotReady {
@@ -194,7 +223,6 @@ fn save_agent_preflight(
     query_workspace(transaction, workspace_id)?;
     let now = crate::time::now_utc();
     let agent_status = if preflight.ready { "READY" } else { "DEGRADED" };
-    let workspace_status = agent_status;
     let capability_json = serde_json::to_string(&preflight.capabilities)
         .map_err(|error| ReactorError::InvalidInput(error.to_string()))?;
     transaction.execute(
@@ -215,10 +243,7 @@ fn save_agent_preflight(
             now
         ],
     )?;
-    transaction.execute(
-        "UPDATE workspaces SET status = ?1, policy_fingerprint = ?2, updated_at = ?3 WHERE id = ?4",
-        params![workspace_status, fingerprint, now, workspace_id],
-    )?;
+    refresh_workspace_status(transaction, workspace_id, &now)?;
     write_event(
         transaction,
         "AGENT_PREFLIGHT_COMPLETED",
@@ -232,6 +257,23 @@ fn save_agent_preflight(
         &now,
     )?;
     query_workspace(transaction, workspace_id)
+}
+
+fn refresh_workspace_status(
+    transaction: &Transaction<'_>,
+    workspace_id: &str,
+    updated_at: &str,
+) -> Result<()> {
+    transaction.execute(
+        "UPDATE workspaces SET status = CASE
+             WHEN EXISTS (
+                 SELECT 1 FROM workspace_agents
+                 WHERE workspace_id = ?1 AND status = 'READY'
+             ) THEN 'READY' ELSE 'DEGRADED' END,
+         updated_at = ?2 WHERE id = ?1",
+        params![workspace_id, updated_at],
+    )?;
+    Ok(())
 }
 
 fn query_workspace(connection: &Connection, id: &str) -> Result<WorkspaceRecord> {

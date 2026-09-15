@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 
 use crate::{
-    agents::AgentKind,
+    agents::{AgentKind, AgentPreflight},
     app::App,
     error::Result,
     input, output,
@@ -78,7 +78,7 @@ fn workspace_add(format: OutputFormat, arguments: &WorkspaceAddArgs) -> Result<(
         .map(input::read_document::<WorkspacePolicy>)
         .transpose()?
         .unwrap_or_default();
-    let policy_fingerprint = fingerprint(&workspace, &policy)?;
+    let policy_fingerprint = fingerprint(&workspace, &policy, &[])?;
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let record = app.store.register_workspace(
@@ -104,7 +104,7 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
             return write_workspace(format, &app.instance_id, &record);
         }
     };
-    let policy_fingerprint = match fingerprint(&workspace, &record.policy) {
+    let workspace_fingerprint = match fingerprint(&workspace, &record.policy, &[]) {
         Ok(fingerprint) => fingerprint,
         Err(_) => {
             let record = app
@@ -113,12 +113,37 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
             return write_workspace(format, &app.instance_id, &record);
         }
     };
-    let result = arguments.agent.adapter().preflight(&workspace.path)?;
+    if workspace_fingerprint != record.policy_fingerprint {
+        let record = app
+            .store
+            .mark_workspace_degraded(&arguments.workspace_id, "policy_changed")?;
+        return write_workspace(format, &app.instance_id, &record);
+    }
+    let adapter = arguments.agent.adapter();
+    let agent_fingerprint = match fingerprint(&workspace, &record.policy, adapter.policy_files()) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            let preflight = AgentPreflight {
+                ready: false,
+                reason: Some("agent_policy_unreadable".to_owned()),
+                capabilities: serde_json::json!({}),
+            };
+            let record = app.store.record_agent_preflight(
+                &arguments.workspace_id,
+                arguments.agent.as_str(),
+                &preflight,
+                &workspace_fingerprint,
+                arguments.idempotency_key.as_deref(),
+            )?;
+            return write_workspace(format, &app.instance_id, &record);
+        }
+    };
+    let result = adapter.preflight(&workspace.path)?;
     let record = app.store.record_agent_preflight(
         &arguments.workspace_id,
         arguments.agent.as_str(),
         &result,
-        &policy_fingerprint,
+        &agent_fingerprint,
         arguments.idempotency_key.as_deref(),
     )?;
     write_workspace(format, &app.instance_id, &record)
@@ -128,20 +153,57 @@ fn workspace_status(format: OutputFormat, arguments: &WorkspaceIdArgs) -> Result
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let record = app.store.get_workspace(&arguments.workspace_id)?;
-    let refreshed = match canonicalize(std::path::Path::new(&record.canonical_path)) {
-        Ok(workspace) => match fingerprint(&workspace, &record.policy) {
-            Ok(current) if current == record.policy_fingerprint => record,
-            Ok(_) => app
+    let workspace = match canonicalize(std::path::Path::new(&record.canonical_path)) {
+        Ok(workspace) => workspace,
+        Err(_) => {
+            let record = app
                 .store
-                .mark_workspace_degraded(&arguments.workspace_id, "policy_changed")?,
-            Err(_) => app
-                .store
-                .mark_workspace_degraded(&arguments.workspace_id, "policy_unreadable")?,
-        },
-        Err(_) => app
-            .store
-            .mark_workspace_degraded(&arguments.workspace_id, "path_unavailable")?,
+                .mark_workspace_degraded(&arguments.workspace_id, "path_unavailable")?;
+            return write_workspace(format, &app.instance_id, &record);
+        }
     };
+    let current = match fingerprint(&workspace, &record.policy, &[]) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            let record = app
+                .store
+                .mark_workspace_degraded(&arguments.workspace_id, "policy_unreadable")?;
+            return write_workspace(format, &app.instance_id, &record);
+        }
+    };
+    if current != record.policy_fingerprint {
+        let record = app
+            .store
+            .mark_workspace_degraded(&arguments.workspace_id, "policy_changed")?;
+        return write_workspace(format, &app.instance_id, &record);
+    }
+
+    let mut refreshed = record.clone();
+    for agent in &record.agents {
+        if agent.status != "READY" {
+            continue;
+        }
+        let Some(kind) = AgentKind::parse(&agent.agent_kind) else {
+            refreshed = app.store.mark_workspace_agent_degraded(
+                &arguments.workspace_id,
+                &agent.agent_kind,
+                "adapter_unavailable",
+            )?;
+            continue;
+        };
+        let adapter = kind.adapter();
+        let changed = match fingerprint(&workspace, &record.policy, adapter.policy_files()) {
+            Ok(current) => Some(current.as_str()) != agent.policy_fingerprint.as_deref(),
+            Err(_) => true,
+        };
+        if changed {
+            refreshed = app.store.mark_workspace_agent_degraded(
+                &arguments.workspace_id,
+                &agent.agent_kind,
+                "agent_policy_changed",
+            )?;
+        }
+    }
     write_workspace(format, &app.instance_id, &refreshed)
 }
 

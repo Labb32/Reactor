@@ -25,6 +25,13 @@ impl AgentKind {
             Self::Codex => &codex::CodexAdapter,
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -40,9 +47,13 @@ pub struct AgentCommand {
     pub program: OsString,
     pub arguments: Vec<OsString>,
     pub current_dir: PathBuf,
+    /// Clear inherited variables, then restore only these names.
+    pub environment_allowlist: &'static [&'static str],
 }
 
 pub trait AgentAdapter {
+    fn policy_files(&self) -> &'static [&'static str];
+
     fn preflight(&self, workspace: &std::path::Path) -> Result<AgentPreflight>;
 
     #[allow(dead_code)]

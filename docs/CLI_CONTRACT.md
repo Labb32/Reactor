@@ -62,6 +62,8 @@ reactor workspace list
 
 Only `workspace add` accepts a raw path. The default policy is `{"access":"sandbox"}`; `full_access` is opt-in. Codex preparation requires version 0.154.0 or later and records only readiness metadata.
 
+Scheduled Codex commands ignore user configuration and disable MCP servers and hooks. Execution rules remain active. `full_access` removes the agent sandbox and must be treated as access by the current OS user.
+
 ## Events
 
 ```shell

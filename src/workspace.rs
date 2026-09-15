@@ -1,11 +1,14 @@
 use std::{
-    fs,
+    fs::{self, File},
+    io::Read,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ReactorError, Result, io_error};
+
+const MAX_POLICY_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,7 +80,11 @@ pub fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn fingerprint(workspace: &CanonicalWorkspace, policy: &WorkspacePolicy) -> Result<String> {
+pub fn fingerprint(
+    workspace: &CanonicalWorkspace,
+    policy: &WorkspacePolicy,
+    policy_files: &[&str],
+) -> Result<String> {
     let mut hash = blake3::Hasher::new();
     hash.update(workspace.key.as_bytes());
     hash.update(b"\0");
@@ -86,12 +93,39 @@ pub fn fingerprint(workspace: &CanonicalWorkspace, policy: &WorkspacePolicy) -> 
             .map_err(|error| ReactorError::InvalidInput(error.to_string()))?,
     );
     hash.update(b"\0");
-    for relative in ["AGENTS.md", ".codex/config.toml"] {
+    for relative in policy_files {
         let path = workspace.path.join(relative);
-        match fs::read(&path) {
-            Ok(bytes) => {
+        match File::open(&path) {
+            Ok(mut file) => {
+                let size = file
+                    .metadata()
+                    .map_err(|source| io_error(&path, source))?
+                    .len();
+                if size > MAX_POLICY_FILE_BYTES {
+                    return Err(ReactorError::InvalidInput(format!(
+                        "policy file exceeds 1 MiB: {relative}"
+                    )));
+                }
                 hash.update(relative.as_bytes());
-                hash.update(&bytes);
+                hash.update(b"\0");
+                let mut buffer = [0_u8; 8192];
+                let mut total = 0_u64;
+                loop {
+                    let count = file
+                        .read(&mut buffer)
+                        .map_err(|source| io_error(&path, source))?;
+                    if count == 0 {
+                        break;
+                    }
+                    total += count as u64;
+                    if total > MAX_POLICY_FILE_BYTES {
+                        return Err(ReactorError::InvalidInput(format!(
+                            "policy file exceeds 1 MiB: {relative}"
+                        )));
+                    }
+                    hash.update(&buffer[..count]);
+                }
+                hash.update(b"\0");
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(io_error(path, source)),
