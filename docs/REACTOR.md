@@ -1,7 +1,7 @@
 ---
 type: project
 tier: T4
-status: Planning
+status: In_Progress
 created: 2026-09-11
 ---
 
