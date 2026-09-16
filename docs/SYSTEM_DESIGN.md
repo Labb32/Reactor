@@ -91,6 +91,12 @@ workspace add
 
 Trust 변경은 `workspace prepare`에서만 수행하고 감사 이력을 남긴다. Path나 설정이 바뀌면 `DEGRADED`로 전환한다.
 
+## Plan
+
+기본 Plan은 사용자가 검토한 Context와 `requirements: inherit`를 저장하며 Agent를 사전에 실행하지 않는다. 선택한 경우에만 Agent가 Context에서 Plan 초안과 예상 요구 사항을 만들고, 사용자가 검토한 결과를 새 Plan Version으로 저장한다.
+
+명시된 경로, Network와 Tool 요구 사항은 Workspace 정책과 Agent capability를 넘을 수 없다. Agent가 추출한 요구 사항은 예상치이며 실행 권한을 확대하지 않는다. 반복 Schedule은 승인된 Plan Version을 재사용한다.
+
 ## Sandbox
 
 Reactor는 Workspace와 추가 쓰기 경로를 검증하고 이를 Agent 실행 옵션으로 변환한다. 실제 파일·Network·Process 제한은 Agent sandbox가 강제한다. 현재 사용자 환경의 Credential, 도구 설치와 외부 서비스 상태는 Reactor가 관리하지 않는다.

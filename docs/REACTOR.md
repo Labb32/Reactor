@@ -46,12 +46,13 @@ reactor workspace status example
 
 ## 일반 Context Plan
 
-기본 입력은 사용자가 검토한 Text 또는 Markdown이다. 기존 Agent의 plan mode 결과를 그대로 사용할 수 있다.
+기본 입력은 사용자가 검토한 Text 또는 Markdown이며 Plan 생성 때문에 Agent를 미리 실행하지 않는다. 기존 Agent의 plan mode 결과도 그대로 사용할 수 있다.
 
 ```yaml
 title: "의존성 업데이트"
 workspace_id: example
 agent: codex
+requirements: inherit
 context: |
   목표: 호환 가능한 의존성을 갱신한다.
 
@@ -68,6 +69,10 @@ limits:
   max_wall_time: 2h
   max_attempts: 2
 ```
+
+`requirements: inherit`는 Workspace 정책 안에서 실행한다는 뜻이다. 추가 경로, Network나 특정 Tool의 사전 확인이 필요하면 요구 사항을 명시할 수 있다.
+
+Agent가 Context에서 실행 순서와 예상 요구 사항을 작성하는 기능은 선택 사항이다. 생성된 초안은 권한 선언으로 신뢰하지 않고 사용자가 검토한 뒤 승인한다. 반복 예약은 같은 승인 Version을 사용하며 Context나 정책 요구가 바뀔 때만 다시 검토한다.
 
 Plan은 `DRAFT → IN_REVIEW → APPROVED` 순서로 승인한다. 승인된 Version은 수정하지 않으며 변경 시 새 Version을 만든다.
 
@@ -130,7 +135,7 @@ Run 시작과 종료에 파일 manifest를 만들어 생성·수정·삭제 목�
 reactor init
 reactor service install|start|stop|status|uninstall
 reactor workspace add|prepare|status|list
-reactor plan create|show|revise|review|approve
+reactor plan create|draft|show|revise|review|approve
 reactor schedule add|pause|resume
 reactor run start|list|show|progress|diff|result|retry|cancel
 reactor queue show

@@ -66,6 +66,19 @@ Repeating `workspace add` with the same ID and Canonical Path updates its policy
 
 Scheduled Agent commands never request interactive approval. Reactor applies the Workspace policy through the Agent sandbox and rejects unsupported permissions. Existing user credentials remain owned by the Agent and external CLI; Reactor does not store their values.
 
+## Plans
+
+```shell
+reactor plan create --workspace <workspace_id> --file <context>
+reactor plan draft --workspace <workspace_id> --agent <agent> --file <context>
+reactor plan show <plan_id>
+reactor plan revise <plan_id> --file <context>
+reactor plan review <plan_id>
+reactor plan approve <plan_id>
+```
+
+`plan create` stores the reviewed Context without running an Agent and defaults to `requirements: inherit`. `plan draft` optionally asks an Agent to produce a draft and expected requirements; its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules.
+
 ## Events
 
 ```shell
