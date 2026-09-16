@@ -97,6 +97,13 @@ pub enum ReactorError {
     #[error("version {version} of plan {plan_id} was not found")]
     PlanVersionNotFound { plan_id: String, version: u32 },
 
+    #[error("plan {plan_id} changed from version {expected} to {found} before approval")]
+    PlanVersionChanged {
+        plan_id: String,
+        expected: u32,
+        found: u32,
+    },
+
     #[error("plan {plan_id} cannot transition from {from} to {to}")]
     InvalidPlanTransition {
         plan_id: String,
@@ -159,6 +166,7 @@ impl ReactorError {
             | Self::AgentUnavailable { .. }
             | Self::PlanNotFound(_)
             | Self::PlanVersionNotFound { .. }
+            | Self::PlanVersionChanged { .. }
             | Self::InvalidPlanTransition { .. }
             | Self::PlanRequirementUnavailable { .. }
             | Self::PlanPolicyChanged => 4,
@@ -201,6 +209,7 @@ impl ReactorError {
             Self::InvalidPlan(_) => "invalid_plan",
             Self::PlanNotFound(_) => "plan_not_found",
             Self::PlanVersionNotFound { .. } => "plan_version_not_found",
+            Self::PlanVersionChanged { .. } => "plan_version_changed",
             Self::InvalidPlanTransition { .. } => "invalid_plan_transition",
             Self::PlanRequirementUnavailable { .. } => "plan_requirement_unavailable",
             Self::PlanPolicyChanged => "plan_policy_changed",
@@ -240,6 +249,15 @@ impl ReactorError {
             Self::PlanVersionNotFound { plan_id, version } => {
                 serde_json::json!({ "plan_id": plan_id, "version": version })
             }
+            Self::PlanVersionChanged {
+                plan_id,
+                expected,
+                found,
+            } => serde_json::json!({
+                "plan_id": plan_id,
+                "expected": expected,
+                "found": found
+            }),
             Self::InvalidPlanTransition { plan_id, from, to } => {
                 serde_json::json!({ "plan_id": plan_id, "from": from, "to": to })
             }

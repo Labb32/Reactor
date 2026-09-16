@@ -1,44 +1,15 @@
-use std::{
-    fs,
-    io::Write,
-    process::{Command, Stdio},
-};
-
 use clap::{Args, Subcommand};
 
 use crate::{
     agents::AgentKind,
     app::App,
-    error::{ReactorError, Result, io_error},
+    error::{ReactorError, Result},
     input, output,
     output::{Envelope, OutputFormat},
     paths::ReactorPaths,
-    plan::{AgentPlanDraft, PlanInput, PlanLimits, PlanRecord, prepare_input, validate_tools},
-    workspace::{WorkspaceRecord, canonicalize, fingerprint, normalize_policy},
+    plan::{PlanInput, PlanLimits, PlanRecord, prepare_input, validate_tools},
+    plan_draft,
 };
-
-const DRAFT_SCHEMA: &str = r#"{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["title", "context", "requirements", "completion_criteria"],
-  "properties": {
-    "title": { "type": "string" },
-    "context": { "type": "string" },
-    "requirements": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["writable_roots", "network", "mcp", "hooks", "tools"],
-      "properties": {
-        "writable_roots": { "type": "array", "items": { "type": "string" } },
-        "network": { "type": "boolean" },
-        "mcp": { "type": "boolean" },
-        "hooks": { "type": "boolean" },
-        "tools": { "type": "array", "items": { "type": "string" } }
-      }
-    },
-    "completion_criteria": { "type": "array", "items": { "type": "string" } }
-  }
-}"#;
 
 #[derive(Debug, Args)]
 pub(super) struct PlanArgs {
@@ -97,6 +68,9 @@ struct PlanDraftArgs {
 
     #[arg(long, default_value_t = 1)]
     max_attempts: u32,
+
+    #[arg(long, default_value_t = plan_draft::DEFAULT_TIMEOUT_SECONDS)]
+    draft_timeout_seconds: u64,
 
     #[arg(long)]
     idempotency_key: Option<String>,
@@ -168,9 +142,22 @@ fn draft(format: OutputFormat, arguments: &PlanDraftArgs) -> Result<()> {
     {
         return write_plan(format, &app.instance_id, &plan);
     }
-    let workspace = require_ready_workspace(&mut app, &arguments.workspace, arguments.agent)?;
+    if !(1..=plan_draft::MAX_TIMEOUT_SECONDS).contains(&arguments.draft_timeout_seconds) {
+        return Err(ReactorError::InvalidArgument(
+            "--draft-timeout-seconds must be between 1 and 3600".to_owned(),
+        ));
+    }
+    let workspace =
+        super::workspaces::require_ready(&mut app, &arguments.workspace, arguments.agent)?;
 
-    let draft = run_agent_draft(&paths, &workspace, arguments, &context)?;
+    let draft = plan_draft::generate(
+        &paths,
+        &workspace,
+        arguments.agent,
+        arguments.model.as_deref(),
+        &context,
+        arguments.draft_timeout_seconds,
+    )?;
     let input = draft.into_input(
         arguments.workspace.clone(),
         arguments.agent,
@@ -254,7 +241,7 @@ fn approve(format: OutputFormat, arguments: &PlanApproveArgs) -> Result<()> {
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let current = app.store.get_plan(&arguments.plan_id, None)?;
-    require_ready_workspace(
+    super::workspaces::require_ready(
         &mut app,
         &current.version.workspace_id,
         current.version.agent,
@@ -265,13 +252,17 @@ fn approve(format: OutputFormat, arguments: &PlanApproveArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(default_approver);
     let approved_by = approved_by.trim();
-    if approved_by.is_empty() || approved_by.len() > 128 {
+    if approved_by.is_empty()
+        || approved_by.len() > 128
+        || approved_by.chars().any(char::is_control)
+    {
         return Err(ReactorError::InvalidArgument(
-            "--approved-by must contain 1 to 128 bytes".to_owned(),
+            "--approved-by must contain 1 to 128 bytes without control characters".to_owned(),
         ));
     }
     let plan = app.store.approve_plan(
         &arguments.plan_id,
+        current.current_version,
         approved_by,
         arguments.idempotency_key.as_deref(),
     )?;
@@ -284,137 +275,6 @@ fn default_approver() -> String {
         .unwrap_or_else(|_| "local_user".to_owned())
 }
 
-fn require_ready_workspace(
-    app: &mut App,
-    workspace_id: &str,
-    agent: AgentKind,
-) -> Result<WorkspaceRecord> {
-    let record = app.store.get_workspace(workspace_id)?;
-    let workspace = match canonicalize(std::path::Path::new(&record.canonical_path)) {
-        Ok(workspace) => workspace,
-        Err(_) => {
-            app.store
-                .mark_workspace_degraded(workspace_id, "path_unavailable")?;
-            return Err(ReactorError::AgentNotReady {
-                workspace_id: workspace_id.to_owned(),
-                agent: agent.as_str().to_owned(),
-                reason: "workspace path is unavailable".to_owned(),
-            });
-        }
-    };
-    let policy = match normalize_policy(&workspace, &record.policy) {
-        Ok(policy) => policy,
-        Err(_) => {
-            app.store
-                .mark_workspace_degraded(workspace_id, "policy_unreadable")?;
-            return Err(ReactorError::AgentNotReady {
-                workspace_id: workspace_id.to_owned(),
-                agent: agent.as_str().to_owned(),
-                reason: "workspace policy is unreadable".to_owned(),
-            });
-        }
-    };
-    let workspace_fingerprint = fingerprint(&workspace, &policy, &[])?;
-    if workspace_fingerprint != record.policy_fingerprint {
-        app.store
-            .mark_workspace_degraded(workspace_id, "policy_changed")?;
-        return Err(ReactorError::AgentNotReady {
-            workspace_id: workspace_id.to_owned(),
-            agent: agent.as_str().to_owned(),
-            reason: "workspace policy changed".to_owned(),
-        });
-    }
-
-    let adapter = agent.adapter();
-    let agent_fingerprint = fingerprint(&workspace, &policy, adapter.policy_files())?;
-    let ready = record.agents.iter().any(|prepared| {
-        prepared.agent_kind == agent.as_str()
-            && prepared.status == "READY"
-            && prepared.policy_fingerprint.as_deref() == Some(agent_fingerprint.as_str())
-    });
-    if record.status != "READY" || !ready {
-        app.store.mark_workspace_agent_degraded(
-            workspace_id,
-            agent.as_str(),
-            "agent_policy_changed",
-        )?;
-        return Err(ReactorError::AgentNotReady {
-            workspace_id: workspace_id.to_owned(),
-            agent: agent.as_str().to_owned(),
-            reason: "run workspace prepare again".to_owned(),
-        });
-    }
-    Ok(record)
-}
-
-fn run_agent_draft(
-    paths: &ReactorPaths,
-    workspace: &crate::workspace::WorkspaceRecord,
-    arguments: &PlanDraftArgs,
-    context: &str,
-) -> Result<AgentPlanDraft> {
-    let draft_dir = paths.data_dir.join("drafts");
-    fs::create_dir_all(&draft_dir).map_err(|source| io_error(&draft_dir, source))?;
-    let token = crate::ids::new_id();
-    let schema_path = draft_dir.join(format!("{token}.schema.json"));
-    let output_path = draft_dir.join(format!("{token}.output.json"));
-    fs::write(&schema_path, DRAFT_SCHEMA).map_err(|source| io_error(&schema_path, source))?;
-
-    let result = (|| {
-        let command = arguments.agent.adapter().draft_command(
-            std::path::Path::new(&workspace.canonical_path),
-            &schema_path,
-            &output_path,
-            arguments.model.as_deref(),
-        )?;
-        let mut child = Command::new(&command.program)
-            .args(&command.arguments)
-            .current_dir(&command.current_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| io_error(&command.current_dir, source))?;
-        let prompt = format!(
-            "Create an execution plan for the request below. Do not modify files or perform the task. Use `workspace` for the primary writable root and list only additional paths that are required. Return only the requested structured output.\n\n<request>\n{context}\n</request>"
-        );
-        let write_result = child
-            .stdin
-            .take()
-            .ok_or_else(|| ReactorError::AgentUnavailable {
-                agent: arguments.agent.as_str().to_owned(),
-                reason: "stdin_unavailable".to_owned(),
-            })
-            .and_then(|mut stdin| {
-                stdin
-                    .write_all(prompt.as_bytes())
-                    .map_err(|source| io_error("agent stdin", source))
-            });
-        if let Err(error) = write_result {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|source| io_error(&command.current_dir, source))?;
-        if !output.status.success() {
-            let reason = String::from_utf8_lossy(&output.stderr);
-            return Err(ReactorError::AgentUnavailable {
-                agent: arguments.agent.as_str().to_owned(),
-                reason: reason.chars().take(1_000).collect(),
-            });
-        }
-        let bytes = fs::read(&output_path).map_err(|source| io_error(&output_path, source))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| ReactorError::InvalidInput(format!("invalid Agent draft: {error}")))
-    })();
-
-    let _ = fs::remove_file(&schema_path);
-    let _ = fs::remove_file(&output_path);
-    result
-}
-
 fn draft_request(arguments: &PlanDraftArgs, context: &str) -> Result<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({
         "operation": "plan_draft",
@@ -424,6 +284,7 @@ fn draft_request(arguments: &PlanDraftArgs, context: &str) -> Result<Vec<u8>> {
         "model": arguments.model,
         "max_wall_time_seconds": arguments.max_wall_time_seconds,
         "max_attempts": arguments.max_attempts,
+        "draft_timeout_seconds": arguments.draft_timeout_seconds,
         "context": context
     }))
     .map_err(|error| ReactorError::InvalidInput(error.to_string()))

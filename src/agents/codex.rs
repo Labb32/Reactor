@@ -3,13 +3,42 @@ use std::{ffi::OsString, path::Path, process::Command};
 use semver::Version;
 
 use crate::{
-    agents::{AgentAdapter, AgentCommand, AgentPreflight},
+    agents::{AgentAdapter, AgentCommand, AgentEnvironment, AgentPreflight},
     error::Result,
     workspace::WorkspacePolicy,
 };
 
 const MINIMUM_VERSION: &str = "0.154.0";
 const POLICY_FILES: &[&str] = &["AGENTS.md", ".codex/config.toml"];
+const DRAFT_ENVIRONMENT: &[&str] = &[
+    "APPDATA",
+    "CODEX_API_KEY",
+    "CODEX_HOME",
+    "CURL_CA_BUNDLE",
+    "HOME",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "LANG",
+    "LC_ALL",
+    "LOCALAPPDATA",
+    "NO_PROXY",
+    "OPENAI_API_KEY",
+    "PATH",
+    "PROGRAMDATA",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "WINDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+];
 pub struct CodexAdapter;
 
 impl AgentAdapter for CodexAdapter {
@@ -178,6 +207,7 @@ impl AgentAdapter for CodexAdapter {
             program: launcher.program,
             arguments,
             current_dir: workspace.to_owned(),
+            environment: AgentEnvironment::Inherit,
         })
     }
 
@@ -229,6 +259,7 @@ impl AgentAdapter for CodexAdapter {
             program: launcher.program,
             arguments,
             current_dir: workspace.to_owned(),
+            environment: AgentEnvironment::Selected(DRAFT_ENVIRONMENT),
         })
     }
 }

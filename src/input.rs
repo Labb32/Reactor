@@ -4,6 +4,8 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{ReactorError, Result, io_error};
 
+const MAX_INPUT_BYTES: u64 = 4 * 1024 * 1024;
+
 pub fn read_document<T: DeserializeOwned>(source: &str) -> Result<T> {
     let bytes = read_bytes(source)?;
     parse_document(source, &bytes)
@@ -18,12 +20,32 @@ fn read_bytes(source: &str) -> Result<Vec<u8>> {
     if source == "-" {
         let mut bytes = Vec::new();
         std::io::stdin()
+            .take(MAX_INPUT_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|error| io_error("stdin", error))?;
-        Ok(bytes)
+        validate_size(bytes)
     } else {
-        fs::read(source).map_err(|error| io_error(source, error))
+        read_file(Path::new(source))
     }
+}
+
+pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|error| io_error(path, error))?
+        .take(MAX_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_error(path, error))?;
+    validate_size(bytes)
+}
+
+fn validate_size(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.len() as u64 > MAX_INPUT_BYTES {
+        return Err(ReactorError::InvalidInput(
+            "input document exceeds 4 MiB".to_owned(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn parse_document<T: DeserializeOwned>(source: &str, bytes: &[u8]) -> Result<T> {

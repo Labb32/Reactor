@@ -3,11 +3,13 @@ use clap::{Args, Subcommand};
 use crate::{
     agents::{AgentKind, AgentPreflight},
     app::App,
-    error::Result,
+    error::{ReactorError, Result},
     input, output,
     output::{Envelope, OutputFormat},
     paths::ReactorPaths,
-    workspace::{WorkspacePolicy, canonicalize, fingerprint, normalize_policy, validate_id},
+    workspace::{
+        WorkspacePolicy, WorkspaceRecord, canonicalize, fingerprint, normalize_policy, validate_id,
+    },
 };
 
 #[derive(Debug, Args)]
@@ -248,6 +250,102 @@ fn workspace_list(format: OutputFormat) -> Result<()> {
         OutputFormat::Json | OutputFormat::Jsonl => {
             output::write_json(&Envelope::new(app.instance_id, workspaces))
         }
+    }
+}
+
+pub(super) fn require_ready(
+    app: &mut App,
+    workspace_id: &str,
+    agent: AgentKind,
+) -> Result<WorkspaceRecord> {
+    let record = app.store.get_workspace(workspace_id)?;
+    let workspace = match canonicalize(std::path::Path::new(&record.canonical_path)) {
+        Ok(workspace) => workspace,
+        Err(_) => {
+            app.store
+                .mark_workspace_degraded(workspace_id, "path_unavailable")?;
+            return Err(agent_not_ready(
+                workspace_id,
+                agent,
+                "workspace path is unavailable",
+            ));
+        }
+    };
+    let policy = match normalize_policy(&workspace, &record.policy) {
+        Ok(policy) => policy,
+        Err(_) => {
+            app.store
+                .mark_workspace_degraded(workspace_id, "policy_unreadable")?;
+            return Err(agent_not_ready(
+                workspace_id,
+                agent,
+                "workspace policy is unreadable",
+            ));
+        }
+    };
+    let workspace_fingerprint = match fingerprint(&workspace, &policy, &[]) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            app.store
+                .mark_workspace_degraded(workspace_id, "policy_unreadable")?;
+            return Err(agent_not_ready(
+                workspace_id,
+                agent,
+                "workspace policy is unreadable",
+            ));
+        }
+    };
+    if workspace_fingerprint != record.policy_fingerprint {
+        app.store
+            .mark_workspace_degraded(workspace_id, "policy_changed")?;
+        return Err(agent_not_ready(
+            workspace_id,
+            agent,
+            "workspace policy changed",
+        ));
+    }
+
+    let adapter = agent.adapter();
+    let agent_fingerprint = match fingerprint(&workspace, &policy, adapter.policy_files()) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            app.store.mark_workspace_agent_degraded(
+                workspace_id,
+                agent.as_str(),
+                "agent_policy_unreadable",
+            )?;
+            return Err(agent_not_ready(
+                workspace_id,
+                agent,
+                "Agent policy is unreadable",
+            ));
+        }
+    };
+    let ready = record.agents.iter().any(|prepared| {
+        prepared.agent_kind == agent.as_str()
+            && prepared.status == "READY"
+            && prepared.policy_fingerprint.as_deref() == Some(agent_fingerprint.as_str())
+    });
+    if record.status != "READY" || !ready {
+        app.store.mark_workspace_agent_degraded(
+            workspace_id,
+            agent.as_str(),
+            "agent_policy_changed",
+        )?;
+        return Err(agent_not_ready(
+            workspace_id,
+            agent,
+            "run workspace prepare again",
+        ));
+    }
+    Ok(record)
+}
+
+fn agent_not_ready(workspace_id: &str, agent: AgentKind, reason: &str) -> ReactorError {
+    ReactorError::AgentNotReady {
+        workspace_id: workspace_id.to_owned(),
+        agent: agent.as_str().to_owned(),
+        reason: reason.to_owned(),
     }
 }
 

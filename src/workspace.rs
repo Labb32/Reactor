@@ -60,7 +60,6 @@ pub struct WorkspaceRecord {
 }
 
 impl WorkspaceRecord {
-    #[allow(dead_code)]
     pub fn write_paths(&self) -> Vec<PathBuf> {
         self.policy.write_paths(Path::new(&self.canonical_path))
     }

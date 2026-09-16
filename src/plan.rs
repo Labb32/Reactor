@@ -188,9 +188,9 @@ pub fn validate_tools(requirements: &PlanRequirements) -> Result<()> {
 
 fn validate_input(input: &PlanInput) -> Result<()> {
     let title = input.title.trim();
-    if title.is_empty() || title.len() > MAX_TITLE_BYTES {
+    if title.is_empty() || title.len() > MAX_TITLE_BYTES || title.chars().any(char::is_control) {
         return Err(ReactorError::InvalidPlan(
-            "title must contain 1 to 200 bytes".to_owned(),
+            "title must contain 1 to 200 bytes without control characters".to_owned(),
         ));
     }
     if input.context.trim().is_empty() || input.context.len() > MAX_CONTEXT_BYTES {
@@ -228,9 +228,11 @@ fn validate_input(input: &PlanInput) -> Result<()> {
 }
 
 fn validate_optional_name(field: &str, value: Option<&str>) -> Result<()> {
-    if value.is_some_and(|value| value.trim().is_empty() || value.len() > 128) {
+    if value.is_some_and(|value| {
+        value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+    }) {
         return Err(ReactorError::InvalidPlan(format!(
-            "{field} must contain 1 to 128 bytes"
+            "{field} must contain 1 to 128 bytes without control characters"
         )));
     }
     Ok(())

@@ -4,16 +4,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-#[allow(dead_code)]
-pub enum WorkspaceStatus {
-    Registered,
-    Ready,
-    Degraded,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-#[allow(dead_code)]
 pub enum PlanStatus {
     Draft,
     InReview,

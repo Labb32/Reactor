@@ -40,7 +40,7 @@ impl Config {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let contents = fs::read(path).map_err(|source| io_error(path, source))?;
+        let contents = crate::input::read_file(path)?;
         let config: Self =
             serde_json::from_slice(&contents).map_err(|source| ReactorError::InvalidConfig {
                 path: path.to_path_buf(),
@@ -83,7 +83,8 @@ fn write_config(path: &Path, config: &Config) -> Result<()> {
     fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
 
     let temporary = path.with_extension("json.tmp");
-    let mut file = fs::File::create(&temporary).map_err(|source| io_error(&temporary, source))?;
+    let mut file = crate::permissions::create_private_file(&temporary)
+        .map_err(|source| io_error(&temporary, source))?;
     serde_json::to_writer_pretty(&mut file, config).map_err(|source| {
         ReactorError::InvalidConfig {
             path: temporary.clone(),

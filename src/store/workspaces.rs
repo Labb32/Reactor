@@ -161,30 +161,6 @@ impl Store {
             query_workspace(transaction, workspace_id)
         })
     }
-
-    #[allow(dead_code)]
-    pub fn require_ready_workspace_agent(
-        &self,
-        workspace_id: &str,
-        agent_kind: &str,
-        policy_fingerprint: &str,
-    ) -> Result<()> {
-        let workspace = self.get_workspace(workspace_id)?;
-        let ready = workspace.status == "READY"
-            && workspace.agents.iter().any(|agent| {
-                agent.agent_kind == agent_kind
-                    && agent.status == "READY"
-                    && agent.policy_fingerprint.as_deref() == Some(policy_fingerprint)
-            });
-        if !ready {
-            return Err(ReactorError::AgentNotReady {
-                workspace_id: workspace_id.to_owned(),
-                agent: agent_kind.to_owned(),
-                reason: "run preflight again".to_owned(),
-            });
-        }
-        Ok(())
-    }
 }
 
 fn insert_workspace(

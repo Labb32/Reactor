@@ -1,9 +1,10 @@
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use crate::{
     config::Config,
     error::{Result, io_error},
     paths::ReactorPaths,
+    permissions,
     store::Store,
 };
 
@@ -26,9 +27,10 @@ impl App {
         paths: ReactorPaths,
         config_override: Option<Config>,
     ) -> Result<Initialization> {
-        fs::create_dir_all(&paths.config_dir)
+        permissions::create_private_dir(&paths.config_dir)
             .map_err(|source| io_error(&paths.config_dir, source))?;
-        fs::create_dir_all(&paths.data_dir).map_err(|source| io_error(&paths.data_dir, source))?;
+        permissions::create_private_dir(&paths.data_dir)
+            .map_err(|source| io_error(&paths.data_dir, source))?;
 
         let config_file = paths.config_file();
         let database_file = paths.database_file();
@@ -43,6 +45,8 @@ impl App {
             Config::default()
         };
         let mut store = Store::open(&database_file)?;
+        permissions::restrict_file(&database_file)
+            .map_err(|source| io_error(&database_file, source))?;
         let schema_version = store.migrate()?;
         let instance_id = store.instance_id()?;
         if should_save_config {
@@ -58,8 +62,22 @@ impl App {
     }
 
     pub fn open(paths: &ReactorPaths) -> Result<Self> {
-        let config = Config::load(&paths.config_file())?;
-        let store = Store::open_initialized(&paths.database_file())?;
+        permissions::restrict_dir(&paths.config_dir)
+            .map_err(|source| io_error(&paths.config_dir, source))?;
+        permissions::restrict_dir(&paths.data_dir)
+            .map_err(|source| io_error(&paths.data_dir, source))?;
+        let config_file = paths.config_file();
+        let database_file = paths.database_file();
+        if config_file.exists() {
+            permissions::restrict_file(&config_file)
+                .map_err(|source| io_error(&config_file, source))?;
+        }
+        if database_file.exists() {
+            permissions::restrict_file(&database_file)
+                .map_err(|source| io_error(&database_file, source))?;
+        }
+        let config = Config::load(&config_file)?;
+        let store = Store::open_initialized(&database_file)?;
         let instance_id = store.instance_id()?;
         Ok(Self {
             config,

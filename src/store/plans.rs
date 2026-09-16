@@ -73,17 +73,20 @@ impl Store {
     pub fn approve_plan(
         &mut self,
         plan_id: &str,
+        expected_version: u32,
         approved_by: &str,
         idempotency_key: Option<&str>,
     ) -> Result<PlanRecord> {
         let request = serde_json::to_vec(&serde_json::json!({
             "operation": "plan_approve",
             "plan_id": plan_id,
+            "expected_version": expected_version,
             "approved_by": approved_by
         }))
         .map_err(|error| ReactorError::InvalidInput(error.to_string()))?;
-        let operation =
-            |transaction: &Transaction<'_>| approve_plan(transaction, plan_id, approved_by);
+        let operation = |transaction: &Transaction<'_>| {
+            approve_plan(transaction, plan_id, expected_version, approved_by)
+        };
         match idempotency_key {
             Some(key) => self.idempotent_write(key, &request, operation),
             None => self.write_transaction(operation),
@@ -254,9 +257,17 @@ fn transition_plan(
 fn approve_plan(
     transaction: &Transaction<'_>,
     plan_id: &str,
+    expected_version: u32,
     approved_by: &str,
 ) -> Result<PlanRecord> {
     let current = query_plan(transaction, plan_id, None)?;
+    if current.current_version != expected_version {
+        return Err(ReactorError::PlanVersionChanged {
+            plan_id: plan_id.to_owned(),
+            expected: expected_version,
+            found: current.current_version,
+        });
+    }
     if current.version.status != PlanStatus::InReview.as_str() {
         return Err(ReactorError::InvalidPlanTransition {
             plan_id: plan_id.to_owned(),
