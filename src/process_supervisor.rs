@@ -42,9 +42,7 @@ impl ProcessSupervisor {
         let started = Instant::now();
         loop {
             if let Some(status) = self.child.try_wait()? {
-                let _ = self.containment.force_stop();
-                self.finished = true;
-                return Ok(Some(status));
+                return Ok(Some(self.complete(status)));
             }
             let elapsed = started.elapsed();
             if elapsed >= timeout {
@@ -56,18 +54,23 @@ impl ProcessSupervisor {
 
     pub fn stop(&mut self, grace_period: Duration) -> io::Result<ExitStatus> {
         if let Some(status) = self.child.try_wait()? {
-            let _ = self.containment.force_stop();
-            self.finished = true;
-            return Ok(status);
+            return Ok(self.complete(status));
         }
-        let _ = self.containment.request_stop(self.child.id());
-        if let Some(status) = self.wait_for(grace_period)? {
+        if self.containment.request_stop(self.child.id()).is_ok()
+            && let Some(status) = self.wait_for(grace_period)?
+        {
             return Ok(status);
         }
         self.containment.force_stop()?;
         let status = self.child.wait()?;
         self.finished = true;
         Ok(status)
+    }
+
+    fn complete(&mut self, status: ExitStatus) -> ExitStatus {
+        let _ = self.containment.force_stop();
+        self.finished = true;
+        status
     }
 }
 
@@ -133,7 +136,7 @@ mod platform {
     fn signal_group(process_id: u32, signal: i32) -> io::Result<()> {
         let process_id = i32::try_from(process_id)
             .map_err(|_| io::Error::other("process ID exceeds platform range"))?;
-        // Negative IDs address the process group created before spawn.
+        // SAFETY: The range-checked negative ID targets only the isolated child group.
         if unsafe { kill(-process_id, signal) } == 0 {
             return Ok(());
         }
@@ -180,12 +183,14 @@ mod platform {
 
     impl Containment {
         pub fn new() -> io::Result<Self> {
+            // SAFETY: Null arguments create an unnamed job with default security attributes.
             let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
             if job.is_null() {
                 return Err(io::Error::last_os_error());
             }
             let mut information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: The information pointer is valid for the duration of the call.
             let configured = unsafe {
                 SetInformationJobObject(
                     job,
@@ -196,6 +201,7 @@ mod platform {
             };
             if configured == 0 {
                 let error = io::Error::last_os_error();
+                // SAFETY: The handle was created above and has not been closed.
                 unsafe {
                     CloseHandle(job);
                 }
@@ -206,6 +212,7 @@ mod platform {
 
         pub fn attach(&self, child: &std::process::Child) -> io::Result<()> {
             let process = child.as_raw_handle() as HANDLE;
+            // SAFETY: Both handles remain owned and valid for the duration of the call.
             if unsafe { AssignProcessToJobObject(self.job, process) } == 0 {
                 Err(io::Error::last_os_error())
             } else {
@@ -214,6 +221,7 @@ mod platform {
         }
 
         pub fn request_stop(&self, process_id: u32) -> io::Result<()> {
+            // SAFETY: The child was created as a process group with this identifier.
             if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, process_id) } == 0 {
                 Err(io::Error::last_os_error())
             } else {
@@ -222,6 +230,7 @@ mod platform {
         }
 
         pub fn force_stop(&self) -> io::Result<()> {
+            // SAFETY: The job handle remains valid until Containment is dropped.
             if unsafe { TerminateJobObject(self.job, 1) } == 0 {
                 Err(io::Error::last_os_error())
             } else {
@@ -232,6 +241,7 @@ mod platform {
 
     impl Drop for Containment {
         fn drop(&mut self) {
+            // SAFETY: Containment owns the handle and closes it exactly once.
             unsafe {
                 CloseHandle(self.job);
             }

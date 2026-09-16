@@ -8,9 +8,38 @@ use crate::{
     output::{Envelope, OutputFormat},
     paths::ReactorPaths,
     workspace::{
-        WorkspacePolicy, WorkspaceRecord, canonicalize, fingerprint, normalize_policy, validate_id,
+        CanonicalWorkspace, WorkspacePolicy, WorkspaceRecord, canonicalize, fingerprint,
+        normalize_policy, validate_id,
     },
 };
+
+struct WorkspaceInspection {
+    workspace: CanonicalWorkspace,
+    policy: WorkspacePolicy,
+    fingerprint: String,
+}
+
+#[derive(Clone, Copy)]
+enum InspectionFailure {
+    PathUnavailable,
+    PolicyUnreadable,
+}
+
+impl InspectionFailure {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::PathUnavailable => "path_unavailable",
+            Self::PolicyUnreadable => "policy_unreadable",
+        }
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::PathUnavailable => "workspace path is unavailable",
+            Self::PolicyUnreadable => "workspace policy is unreadable",
+        }
+    }
+}
 
 #[derive(Debug, Args)]
 pub(super) struct WorkspaceArgs {
@@ -98,37 +127,21 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let record = app.store.get_workspace(&arguments.workspace_id)?;
-    let workspace = match canonicalize(std::path::Path::new(&record.canonical_path)) {
-        Ok(workspace) => workspace,
-        Err(_) => {
+    let inspection = match inspect_workspace(&record) {
+        Ok(inspection) => inspection,
+        Err(failure) => {
             let record = app
                 .store
-                .mark_workspace_degraded(&arguments.workspace_id, "path_unavailable")?;
+                .mark_workspace_degraded(&arguments.workspace_id, failure.reason())?;
             return write_workspace(format, &app.instance_id, &record);
         }
     };
-    let policy = match normalize_policy(&workspace, &record.policy) {
-        Ok(policy) => policy,
-        Err(_) => {
-            let record = app
-                .store
-                .mark_workspace_degraded(&arguments.workspace_id, "policy_unreadable")?;
-            return write_workspace(format, &app.instance_id, &record);
-        }
-    };
-    let workspace_fingerprint = match fingerprint(&workspace, &policy, &[]) {
-        Ok(fingerprint) => fingerprint,
-        Err(_) => {
-            let record = app
-                .store
-                .mark_workspace_degraded(&arguments.workspace_id, "policy_unreadable")?;
-            return write_workspace(format, &app.instance_id, &record);
-        }
-    };
-    if workspace_fingerprint != record.policy_fingerprint {
+    if inspection.fingerprint != record.policy_fingerprint {
         if record.policy_fingerprint.is_empty() {
-            app.store
-                .adopt_migrated_workspace_policy(&arguments.workspace_id, &workspace_fingerprint)?;
+            app.store.adopt_migrated_workspace_policy(
+                &arguments.workspace_id,
+                &inspection.fingerprint,
+            )?;
         } else {
             let record = app
                 .store
@@ -137,7 +150,11 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
         }
     }
     let adapter = arguments.agent.adapter();
-    let agent_fingerprint = match fingerprint(&workspace, &policy, adapter.policy_files()) {
+    let agent_fingerprint = match fingerprint(
+        &inspection.workspace,
+        &inspection.policy,
+        adapter.policy_files(),
+    ) {
         Ok(fingerprint) => fingerprint,
         Err(_) => {
             let preflight = AgentPreflight {
@@ -149,13 +166,13 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
                 &arguments.workspace_id,
                 arguments.agent.as_str(),
                 &preflight,
-                &workspace_fingerprint,
+                &inspection.fingerprint,
                 arguments.idempotency_key.as_deref(),
             )?;
             return write_workspace(format, &app.instance_id, &record);
         }
     };
-    let result = adapter.preflight(&workspace.path, &policy)?;
+    let result = adapter.preflight(&inspection.workspace.path, &inspection.policy)?;
     let record = app.store.record_agent_preflight(
         &arguments.workspace_id,
         arguments.agent.as_str(),
@@ -170,34 +187,16 @@ fn workspace_status(format: OutputFormat, arguments: &WorkspaceIdArgs) -> Result
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let record = app.store.get_workspace(&arguments.workspace_id)?;
-    let workspace = match canonicalize(std::path::Path::new(&record.canonical_path)) {
-        Ok(workspace) => workspace,
-        Err(_) => {
+    let inspection = match inspect_workspace(&record) {
+        Ok(inspection) => inspection,
+        Err(failure) => {
             let record = app
                 .store
-                .mark_workspace_degraded(&arguments.workspace_id, "path_unavailable")?;
+                .mark_workspace_degraded(&arguments.workspace_id, failure.reason())?;
             return write_workspace(format, &app.instance_id, &record);
         }
     };
-    let policy = match normalize_policy(&workspace, &record.policy) {
-        Ok(policy) => policy,
-        Err(_) => {
-            let record = app
-                .store
-                .mark_workspace_degraded(&arguments.workspace_id, "policy_unreadable")?;
-            return write_workspace(format, &app.instance_id, &record);
-        }
-    };
-    let current = match fingerprint(&workspace, &policy, &[]) {
-        Ok(fingerprint) => fingerprint,
-        Err(_) => {
-            let record = app
-                .store
-                .mark_workspace_degraded(&arguments.workspace_id, "policy_unreadable")?;
-            return write_workspace(format, &app.instance_id, &record);
-        }
-    };
-    if current != record.policy_fingerprint {
+    if inspection.fingerprint != record.policy_fingerprint {
         let record = app
             .store
             .mark_workspace_degraded(&arguments.workspace_id, "policy_changed")?;
@@ -218,7 +217,11 @@ fn workspace_status(format: OutputFormat, arguments: &WorkspaceIdArgs) -> Result
             continue;
         };
         let adapter = kind.adapter();
-        let changed = match fingerprint(&workspace, &policy, adapter.policy_files()) {
+        let changed = match fingerprint(
+            &inspection.workspace,
+            &inspection.policy,
+            adapter.policy_files(),
+        ) {
             Ok(current) => Some(current.as_str()) != agent.policy_fingerprint.as_deref(),
             Err(_) => true,
         };
@@ -259,43 +262,15 @@ pub(super) fn require_ready(
     agent: AgentKind,
 ) -> Result<WorkspaceRecord> {
     let record = app.store.get_workspace(workspace_id)?;
-    let workspace = match canonicalize(std::path::Path::new(&record.canonical_path)) {
-        Ok(workspace) => workspace,
-        Err(_) => {
+    let inspection = match inspect_workspace(&record) {
+        Ok(inspection) => inspection,
+        Err(failure) => {
             app.store
-                .mark_workspace_degraded(workspace_id, "path_unavailable")?;
-            return Err(agent_not_ready(
-                workspace_id,
-                agent,
-                "workspace path is unavailable",
-            ));
+                .mark_workspace_degraded(workspace_id, failure.reason())?;
+            return Err(agent_not_ready(workspace_id, agent, failure.message()));
         }
     };
-    let policy = match normalize_policy(&workspace, &record.policy) {
-        Ok(policy) => policy,
-        Err(_) => {
-            app.store
-                .mark_workspace_degraded(workspace_id, "policy_unreadable")?;
-            return Err(agent_not_ready(
-                workspace_id,
-                agent,
-                "workspace policy is unreadable",
-            ));
-        }
-    };
-    let workspace_fingerprint = match fingerprint(&workspace, &policy, &[]) {
-        Ok(fingerprint) => fingerprint,
-        Err(_) => {
-            app.store
-                .mark_workspace_degraded(workspace_id, "policy_unreadable")?;
-            return Err(agent_not_ready(
-                workspace_id,
-                agent,
-                "workspace policy is unreadable",
-            ));
-        }
-    };
-    if workspace_fingerprint != record.policy_fingerprint {
+    if inspection.fingerprint != record.policy_fingerprint {
         app.store
             .mark_workspace_degraded(workspace_id, "policy_changed")?;
         return Err(agent_not_ready(
@@ -306,7 +281,11 @@ pub(super) fn require_ready(
     }
 
     let adapter = agent.adapter();
-    let agent_fingerprint = match fingerprint(&workspace, &policy, adapter.policy_files()) {
+    let agent_fingerprint = match fingerprint(
+        &inspection.workspace,
+        &inspection.policy,
+        adapter.policy_files(),
+    ) {
         Ok(fingerprint) => fingerprint,
         Err(_) => {
             app.store.mark_workspace_agent_degraded(
@@ -317,7 +296,7 @@ pub(super) fn require_ready(
             return Err(agent_not_ready(
                 workspace_id,
                 agent,
-                "Agent policy is unreadable",
+                "agent policy is unreadable",
             ));
         }
     };
@@ -339,6 +318,22 @@ pub(super) fn require_ready(
         ));
     }
     Ok(record)
+}
+
+fn inspect_workspace(
+    record: &WorkspaceRecord,
+) -> std::result::Result<WorkspaceInspection, InspectionFailure> {
+    let workspace = canonicalize(std::path::Path::new(&record.canonical_path))
+        .map_err(|_| InspectionFailure::PathUnavailable)?;
+    let policy = normalize_policy(&workspace, &record.policy)
+        .map_err(|_| InspectionFailure::PolicyUnreadable)?;
+    let fingerprint =
+        fingerprint(&workspace, &policy, &[]).map_err(|_| InspectionFailure::PolicyUnreadable)?;
+    Ok(WorkspaceInspection {
+        workspace,
+        policy,
+        fingerprint,
+    })
 }
 
 fn agent_not_ready(workspace_id: &str, agent: AgentKind, reason: &str) -> ReactorError {
