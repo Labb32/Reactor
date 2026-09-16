@@ -11,9 +11,10 @@ use crate::{
     error::{ReactorError, Result},
 };
 
+mod plans;
 mod workspaces;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 4;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_COUNT: i64 = 100_000;
 
@@ -92,19 +93,29 @@ impl Store {
             0 => {
                 transaction.execute_batch(MIGRATION_1)?;
                 insert_instance_id(&transaction)?;
+                transaction.execute_batch(MIGRATION_5)?;
             }
             1 => {
                 transaction.execute_batch(MIGRATION_2)?;
                 insert_instance_id(&transaction)?;
                 transaction.execute_batch(MIGRATION_3)?;
+                transaction.execute_batch(MIGRATION_4)?;
+                transaction.execute_batch(MIGRATION_5)?;
             }
             2 => {
                 transaction.execute_batch(MIGRATION_3)?;
+                transaction.execute_batch(MIGRATION_4)?;
+                transaction.execute_batch(MIGRATION_5)?;
             }
-            3 => {}
+            3 => {
+                transaction.execute_batch(MIGRATION_4)?;
+                transaction.execute_batch(MIGRATION_5)?;
+            }
+            4 => {
+                transaction.execute_batch(MIGRATION_5)?;
+            }
             _ => unreachable!("schema version was checked before migration"),
         }
-        transaction.execute_batch(MIGRATION_4)?;
         transaction.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
 
         transaction.commit()?;
@@ -250,6 +261,32 @@ impl Store {
         Ok(response)
     }
 
+    pub(crate) fn idempotent_response<T: DeserializeOwned>(
+        &self,
+        key: &str,
+        request: &[u8],
+    ) -> Result<Option<T>> {
+        self.ensure_supported_schema()?;
+        let request_hash = blake3::hash(request).to_hex().to_string();
+        let existing: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?1",
+                [key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored_hash, response)) = existing else {
+            return Ok(None);
+        };
+        if stored_hash != request_hash {
+            return Err(ReactorError::IdempotencyConflict);
+        }
+        serde_json::from_str(&response)
+            .map(Some)
+            .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))
+    }
+
     pub(super) fn write_transaction<T>(
         &mut self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T>,
@@ -386,3 +423,4 @@ const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_instance_id.sql");
 const MIGRATION_3: &str = include_str!("../migrations/0003_workspace_policy.sql");
 const MIGRATION_4: &str = include_str!("../migrations/0004_project_sandbox.sql");
+const MIGRATION_5: &str = include_str!("../migrations/0005_plan_requirements.sql");

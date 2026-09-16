@@ -8,6 +8,7 @@ mod ids;
 mod input;
 mod output;
 mod paths;
+mod plan;
 mod store;
 mod time;
 mod workspace;

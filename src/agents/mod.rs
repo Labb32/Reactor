@@ -1,4 +1,7 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -63,5 +66,13 @@ pub trait AgentAdapter {
         &self,
         workspace: &std::path::Path,
         policy: &WorkspacePolicy,
+    ) -> Result<AgentCommand>;
+
+    fn draft_command(
+        &self,
+        workspace: &Path,
+        schema: &Path,
+        output: &Path,
+        model: Option<&str>,
     ) -> Result<AgentCommand>;
 }

@@ -1,8 +1,9 @@
-﻿use std::{process::ExitCode, thread, time::Duration};
+use std::{process::ExitCode, thread, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
+mod plans;
 mod workspaces;
 
 use crate::{
@@ -37,6 +38,8 @@ enum Command {
     Events(EventsArgs),
     /// Register and prepare agent workspaces.
     Workspace(workspaces::WorkspaceArgs),
+    /// Create, review, and approve immutable plan versions.
+    Plan(plans::PlanArgs),
 }
 
 #[derive(Debug, Args)]
@@ -79,6 +82,7 @@ const CAPABILITIES: &[&str] = &[
     "cursor_events",
     "workspace_registry",
     "codex_adapter",
+    "plan_versions",
 ];
 
 fn execute(cli: &Cli) -> Result<()> {
@@ -88,6 +92,7 @@ fn execute(cli: &Cli) -> Result<()> {
         Command::Snapshot => snapshot(cli.output),
         Command::Events(arguments) => events(cli.output, arguments),
         Command::Workspace(arguments) => workspaces::execute(cli.output, arguments),
+        Command::Plan(arguments) => plans::execute(cli.output, arguments),
     }
 }
 

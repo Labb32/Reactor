@@ -343,7 +343,7 @@ fn refresh_workspace_status(
     Ok(())
 }
 
-fn query_workspace(connection: &Connection, id: &str) -> Result<WorkspaceRecord> {
+pub(super) fn query_workspace(connection: &Connection, id: &str) -> Result<WorkspaceRecord> {
     let row: Option<(String, String, String, String, String, String)> = connection
         .query_row(
             "SELECT canonical_path, status, policy_json, policy_fingerprint, created_at, updated_at

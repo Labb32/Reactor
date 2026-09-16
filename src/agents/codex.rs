@@ -180,6 +180,57 @@ impl AgentAdapter for CodexAdapter {
             current_dir: workspace.to_owned(),
         })
     }
+
+    fn draft_command(
+        &self,
+        workspace: &Path,
+        schema: &Path,
+        output: &Path,
+        model: Option<&str>,
+    ) -> Result<AgentCommand> {
+        let launcher =
+            Launcher::find().ok_or_else(|| crate::error::ReactorError::AgentUnavailable {
+                agent: "codex".to_owned(),
+                reason: "not_installed".to_owned(),
+            })?;
+        let mut arguments = launcher.prefix;
+        arguments.extend(
+            [
+                "--ask-for-approval",
+                "never",
+                "exec",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--config",
+                "mcp_servers={}",
+                "--disable",
+                "hooks",
+                "--strict-config",
+                "--color",
+                "never",
+                "--sandbox",
+                "read-only",
+                "--output-schema",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        arguments.push(schema.into());
+        arguments.push("--output-last-message".into());
+        arguments.push(output.into());
+        if let Some(model) = model {
+            arguments.push("--model".into());
+            arguments.push(model.into());
+        }
+        arguments.push("-C".into());
+        arguments.push(workspace.into());
+        arguments.push("-".into());
+        Ok(AgentCommand {
+            program: launcher.program,
+            arguments,
+            current_dir: workspace.to_owned(),
+        })
+    }
 }
 
 struct Launcher {

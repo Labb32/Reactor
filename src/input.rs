@@ -5,17 +5,25 @@ use serde::de::DeserializeOwned;
 use crate::error::{ReactorError, Result, io_error};
 
 pub fn read_document<T: DeserializeOwned>(source: &str) -> Result<T> {
-    let bytes = if source == "-" {
+    let bytes = read_bytes(source)?;
+    parse_document(source, &bytes)
+}
+
+pub fn read_text(source: &str) -> Result<String> {
+    String::from_utf8(read_bytes(source)?)
+        .map_err(|error| ReactorError::InvalidInput(error.to_string()))
+}
+
+fn read_bytes(source: &str) -> Result<Vec<u8>> {
+    if source == "-" {
         let mut bytes = Vec::new();
         std::io::stdin()
             .read_to_end(&mut bytes)
             .map_err(|error| io_error("stdin", error))?;
-        bytes
+        Ok(bytes)
     } else {
-        fs::read(source).map_err(|error| io_error(source, error))?
-    };
-
-    parse_document(source, &bytes)
+        fs::read(source).map_err(|error| io_error(source, error))
+    }
 }
 
 fn parse_document<T: DeserializeOwned>(source: &str, bytes: &[u8]) -> Result<T> {

@@ -87,6 +87,28 @@ pub enum ReactorError {
 
     #[error("agent {agent} is unavailable: {reason}")]
     AgentUnavailable { agent: String, reason: String },
+
+    #[error("plan is invalid: {0}")]
+    InvalidPlan(String),
+
+    #[error("plan {0} was not found")]
+    PlanNotFound(String),
+
+    #[error("version {version} of plan {plan_id} was not found")]
+    PlanVersionNotFound { plan_id: String, version: u32 },
+
+    #[error("plan {plan_id} cannot transition from {from} to {to}")]
+    InvalidPlanTransition {
+        plan_id: String,
+        from: String,
+        to: String,
+    },
+
+    #[error("plan requirement is unavailable: {requirement}")]
+    PlanRequirementUnavailable { requirement: String },
+
+    #[error("workspace policy changed after the plan version was created")]
+    PlanPolicyChanged,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,7 +146,8 @@ impl ReactorError {
             | Self::InvalidConcurrency { .. }
             | Self::InvalidWorkspaceId(_)
             | Self::InvalidWorkspacePath(_)
-            | Self::InvalidSandboxPolicy(_) => 2,
+            | Self::InvalidSandboxPolicy(_)
+            | Self::InvalidPlan(_) => 2,
             Self::UnsupportedSchema { .. }
             | Self::UninitializedDatabase
             | Self::SchemaMigrationRequired { .. } => 3,
@@ -133,7 +156,12 @@ impl ReactorError {
             | Self::WorkspaceOverlap { .. }
             | Self::WorkspaceNotFound(_)
             | Self::AgentNotReady { .. }
-            | Self::AgentUnavailable { .. } => 4,
+            | Self::AgentUnavailable { .. }
+            | Self::PlanNotFound(_)
+            | Self::PlanVersionNotFound { .. }
+            | Self::InvalidPlanTransition { .. }
+            | Self::PlanRequirementUnavailable { .. }
+            | Self::PlanPolicyChanged => 4,
             Self::UserDirectoriesUnavailable
             | Self::EmptyPathOverride { .. }
             | Self::Io { .. }
@@ -170,6 +198,12 @@ impl ReactorError {
             Self::WorkspaceNotFound(_) => "workspace_not_found",
             Self::AgentNotReady { .. } => "agent_not_ready",
             Self::AgentUnavailable { .. } => "agent_unavailable",
+            Self::InvalidPlan(_) => "invalid_plan",
+            Self::PlanNotFound(_) => "plan_not_found",
+            Self::PlanVersionNotFound { .. } => "plan_version_not_found",
+            Self::InvalidPlanTransition { .. } => "invalid_plan_transition",
+            Self::PlanRequirementUnavailable { .. } => "plan_requirement_unavailable",
+            Self::PlanPolicyChanged => "plan_policy_changed",
         }
     }
 
@@ -201,6 +235,16 @@ impl ReactorError {
             }),
             Self::AgentUnavailable { agent, reason } => {
                 serde_json::json!({ "agent": agent, "reason": reason })
+            }
+            Self::PlanNotFound(plan_id) => serde_json::json!({ "plan_id": plan_id }),
+            Self::PlanVersionNotFound { plan_id, version } => {
+                serde_json::json!({ "plan_id": plan_id, "version": version })
+            }
+            Self::InvalidPlanTransition { plan_id, from, to } => {
+                serde_json::json!({ "plan_id": plan_id, "from": from, "to": to })
+            }
+            Self::PlanRequirementUnavailable { requirement } => {
+                serde_json::json!({ "requirement": requirement })
             }
             _ => serde_json::json!({}),
         }

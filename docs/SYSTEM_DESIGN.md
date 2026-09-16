@@ -93,9 +93,9 @@ Trust 변경은 `workspace prepare`에서만 수행하고 감사 이력을 남�
 
 ## Plan
 
-기본 Plan은 사용자가 검토한 Context와 `requirements: inherit`를 저장하며 Agent를 사전에 실행하지 않는다. 선택한 경우에만 Agent가 Context에서 Plan 초안과 예상 요구 사항을 만들고, 사용자가 검토한 결과를 새 Plan Version으로 저장한다.
+기본 Plan은 사용자가 검토한 Context와 `requirements: inherit`를 저장하며 Agent를 사전에 실행하지 않는다. 선택한 경우에만 Agent가 읽기 전용 환경에서 Context로부터 Plan 초안과 예상 요구 사항을 만들고, 사용자가 검토한 결과를 새 Plan Version으로 저장한다.
 
-명시된 경로, Network와 Tool 요구 사항은 Workspace 정책과 Agent capability를 넘을 수 없다. Agent가 추출한 요구 사항은 예상치이며 실행 권한을 확대하지 않는다. 반복 Schedule은 승인된 Plan Version을 재사용한다.
+명시된 경로, Network와 Tool 요구 사항은 Workspace 정책과 Agent capability를 넘을 수 없다. Agent가 추출한 요구 사항은 예상치이며 실행 권한을 확대하지 않는다. 승인 직전에 Workspace와 Agent 정책 fingerprint 및 Tool을 다시 확인한다. 반복 Schedule은 승인된 Plan Version을 재사용한다.
 
 ## Sandbox
 

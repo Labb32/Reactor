@@ -20,6 +20,16 @@ pub enum PlanStatus {
     Approved,
 }
 
+impl PlanStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "DRAFT",
+            Self::InReview => "IN_REVIEW",
+            Self::Approved => "APPROVED",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RunState {

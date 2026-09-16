@@ -69,15 +69,31 @@ Scheduled Agent commands never request interactive approval. Reactor applies the
 ## Plans
 
 ```shell
-reactor plan create --workspace <workspace_id> --file <context>
-reactor plan draft --workspace <workspace_id> --agent <agent> --file <context>
-reactor plan show <plan_id>
-reactor plan revise <plan_id> --file <context>
-reactor plan review <plan_id>
-reactor plan approve <plan_id>
+reactor plan create --file <plan.yaml> [--idempotency-key <key>]
+reactor plan draft --workspace <workspace_id> --agent <agent> --file <context> [--idempotency-key <key>]
+reactor plan show <plan_id> [--version <number>]
+reactor plan list
+reactor plan revise <plan_id> --file <plan.yaml> [--idempotency-key <key>]
+reactor plan review <plan_id> [--idempotency-key <key>]
+reactor plan approve <plan_id> [--approved-by <name>] [--idempotency-key <key>]
 ```
 
-`plan create` stores the reviewed Context without running an Agent and defaults to `requirements: inherit`. `plan draft` optionally asks an Agent to produce a draft and expected requirements; its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules.
+`plan create` stores a reviewed JSON or YAML document without running an Agent and defaults to `requirements: inherit`. `plan draft` reads plain text or Markdown and optionally asks an Agent to produce a draft and expected requirements. Draft generation uses a read-only sandbox with Network, MCP, Hooks, and user configuration disabled. Its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules.
+
+```yaml
+workspace_id: example
+title: Update dependencies
+agent: codex
+context: Update compatible dependencies and report the result.
+requirements: inherit
+completion_criteria:
+  - Report changed files and unresolved issues
+limits:
+  max_wall_time_seconds: 7200
+  max_attempts: 1
+```
+
+Explicit requirements may contain `writable_roots`, `network`, `mcp`, `hooks`, and `tools`. They describe the minimum expected environment and never expand the Workspace policy. Tool availability and current Workspace readiness are checked before approval.
 
 ## Events
 

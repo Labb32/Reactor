@@ -66,13 +66,22 @@ context: |
 completion_criteria:
   - "변경 파일과 미해결 문제 보고"
 limits:
-  max_wall_time: 2h
+  max_wall_time_seconds: 7200
   max_attempts: 2
 ```
 
 `requirements: inherit`는 Workspace 정책 안에서 실행한다는 뜻이다. 추가 경로, Network나 특정 Tool의 사전 확인이 필요하면 요구 사항을 명시할 수 있다.
 
 Agent가 Context에서 실행 순서와 예상 요구 사항을 작성하는 기능은 선택 사항이다. 생성된 초안은 권한 선언으로 신뢰하지 않고 사용자가 검토한 뒤 승인한다. 반복 예약은 같은 승인 Version을 사용하며 Context나 정책 요구가 바뀔 때만 다시 검토한다.
+
+```shell
+reactor plan create --file plan.yaml
+reactor plan draft --workspace example --agent codex --file request.md
+reactor plan review <plan_id>
+reactor plan approve <plan_id>
+```
+
+`plan draft`는 읽기 전용 sandbox에서 Network, MCP와 Hook을 끄고 실행한다. Agent가 만든 요구 사항도 Workspace 정책을 넘으면 저장하지 않는다.
 
 Plan은 `DRAFT → IN_REVIEW → APPROVED` 순서로 승인한다. 승인된 Version은 수정하지 않으며 변경 시 새 Version을 만든다.
 
