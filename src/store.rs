@@ -12,6 +12,7 @@ use crate::{
 };
 
 mod plans;
+mod schedules;
 mod workspaces;
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 5;

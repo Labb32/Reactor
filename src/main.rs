@@ -12,6 +12,7 @@ mod permissions;
 mod plan;
 mod plan_draft;
 mod process_supervisor;
+mod schedule;
 mod store;
 mod time;
 mod workspace;

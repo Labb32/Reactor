@@ -319,7 +319,11 @@ fn approve_plan(
     query_plan(transaction, plan_id, None)
 }
 
-fn query_plan(connection: &Connection, plan_id: &str, version: Option<u32>) -> Result<PlanRecord> {
+pub(super) fn query_plan(
+    connection: &Connection,
+    plan_id: &str,
+    version: Option<u32>,
+) -> Result<PlanRecord> {
     let plan: Option<(u32, String, String)> = connection
         .query_row(
             "SELECT current_version, created_at, updated_at FROM plans WHERE id = ?1",

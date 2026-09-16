@@ -116,6 +116,19 @@ pub enum ReactorError {
 
     #[error("workspace policy changed after the plan version was created")]
     PlanPolicyChanged,
+
+    #[error("schedule is invalid: {0}")]
+    InvalidSchedule(String),
+
+    #[error("schedule {0} was not found")]
+    ScheduleNotFound(String),
+
+    #[error("schedule {schedule_id} cannot transition from {from} to {to}")]
+    InvalidScheduleTransition {
+        schedule_id: String,
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -154,7 +167,8 @@ impl ReactorError {
             | Self::InvalidWorkspaceId(_)
             | Self::InvalidWorkspacePath(_)
             | Self::InvalidSandboxPolicy(_)
-            | Self::InvalidPlan(_) => 2,
+            | Self::InvalidPlan(_)
+            | Self::InvalidSchedule(_) => 2,
             Self::UnsupportedSchema { .. }
             | Self::UninitializedDatabase
             | Self::SchemaMigrationRequired { .. } => 3,
@@ -169,7 +183,9 @@ impl ReactorError {
             | Self::PlanVersionChanged { .. }
             | Self::InvalidPlanTransition { .. }
             | Self::PlanRequirementUnavailable { .. }
-            | Self::PlanPolicyChanged => 4,
+            | Self::PlanPolicyChanged
+            | Self::ScheduleNotFound(_)
+            | Self::InvalidScheduleTransition { .. } => 4,
             Self::UserDirectoriesUnavailable
             | Self::EmptyPathOverride { .. }
             | Self::Io { .. }
@@ -213,6 +229,9 @@ impl ReactorError {
             Self::InvalidPlanTransition { .. } => "invalid_plan_transition",
             Self::PlanRequirementUnavailable { .. } => "plan_requirement_unavailable",
             Self::PlanPolicyChanged => "plan_policy_changed",
+            Self::InvalidSchedule(_) => "invalid_schedule",
+            Self::ScheduleNotFound(_) => "schedule_not_found",
+            Self::InvalidScheduleTransition { .. } => "invalid_schedule_transition",
         }
     }
 
@@ -264,6 +283,18 @@ impl ReactorError {
             Self::PlanRequirementUnavailable { requirement } => {
                 serde_json::json!({ "requirement": requirement })
             }
+            Self::ScheduleNotFound(schedule_id) => {
+                serde_json::json!({ "schedule_id": schedule_id })
+            }
+            Self::InvalidScheduleTransition {
+                schedule_id,
+                from,
+                to,
+            } => serde_json::json!({
+                "schedule_id": schedule_id,
+                "from": from,
+                "to": to
+            }),
             _ => serde_json::json!({}),
         }
     }

@@ -95,6 +95,32 @@ limits:
 
 Explicit requirements may contain `writable_roots`, `network`, `mcp`, `hooks`, and `tools`. They describe the minimum expected environment and never expand the Workspace policy. Tool availability and current Workspace readiness are checked before approval.
 
+## Schedules and queue
+
+```shell
+reactor schedule add --file <schedule.yaml> [--idempotency-key <key>]
+reactor schedule show <schedule_id>
+reactor schedule list
+reactor schedule pause <schedule_id> [--idempotency-key <key>]
+reactor schedule resume <schedule_id> [--idempotency-key <key>]
+reactor schedule trigger <schedule_id> [--idempotency-key <key>]
+reactor queue list
+```
+
+A schedule pins an approved Plan Version. Omitting `plan_version` selects the current approved version. `start_deadline_seconds` defaults to one hour.
+
+```yaml
+plan_id: 01994ca0-0000-7000-8000-000000000000
+rule:
+  type: at
+  local_time: 2026-09-20T09:00:00
+start_deadline_seconds: 3600
+```
+
+Rule types are `immediate`, `manual`, and `at`. An `at` rule interprets `local_time` in the current user time zone captured when the schedule is created. Reactor stores its IANA name when available and otherwise stores the current UTC offset. A DST gap moves to the next valid local time; a repeated local time selects its first occurrence. A paused occurrence remains pending and becomes `MISSED` if its deadline has passed when resumed.
+
+`queue list` refreshes due occurrences and reports each queued Run with `eligible`, `dispatch_order`, and `blocked_by`. Dispatch uses Workspace FIFO, Workspace round-robin, one active Run per Workspace, and the configured global, Agent, Provider, and local endpoint limits.
+
 ## Events
 
 ```shell
