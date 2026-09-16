@@ -536,6 +536,7 @@ dependencies = [
  "directories",
  "dunce",
  "jiff",
+ "libc",
  "rusqlite",
  "semver",
  "serde",
@@ -543,6 +544,7 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]

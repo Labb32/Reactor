@@ -4,7 +4,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::{
@@ -13,12 +13,14 @@ use crate::{
     input,
     paths::ReactorPaths,
     plan::AgentPlanDraft,
+    process_supervisor::ProcessSupervisor,
     workspace::WorkspaceRecord,
 };
 
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 pub const MAX_TIMEOUT_SECONDS: u64 = 3_600;
 const MAX_AGENT_ERROR_BYTES: usize = 16 * 1024;
+const STOP_GRACE_PERIOD: Duration = Duration::from_secs(3);
 const DRAFT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
@@ -93,12 +95,10 @@ fn generate_inner(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    isolate_process_tree(&mut process);
-    let mut child = process
-        .spawn()
+    let mut supervisor = ProcessSupervisor::spawn(process)
         .map_err(|source| io_error(&command.current_dir, source))?;
     let (stderr_sender, stderr_receiver) = mpsc::sync_channel(1);
-    if let Some(mut stderr) = child.stderr.take() {
+    if let Some(mut stderr) = supervisor.take_stderr() {
         thread::spawn(move || {
             let _ = stderr_sender.send(read_agent_error(&mut stderr));
         });
@@ -107,8 +107,7 @@ fn generate_inner(
     let prompt = format!(
         "Create an execution plan for the request below. Do not modify files or perform the task. Use `workspace` for the primary writable root and list only additional paths that are required. Return only the requested structured output.\n\n<request>\n{context}\n</request>"
     );
-    let Some(mut stdin) = child.stdin.take() else {
-        terminate_process_tree(&mut child);
+    let Some(mut stdin) = supervisor.take_stdin() else {
         return Err(ReactorError::AgentUnavailable {
             agent: agent.as_str().to_owned(),
             reason: "stdin_unavailable".to_owned(),
@@ -122,25 +121,24 @@ fn generate_inner(
         let _ = stdin_sender.send(result);
     });
 
-    let started = Instant::now();
     let timeout = Duration::from_secs(timeout_seconds);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(source) => {
-                terminate_process_tree(&mut child);
-                return Err(io_error(&command.current_dir, source));
+    let status = match supervisor
+        .wait_for(timeout)
+        .map_err(|source| io_error(&command.current_dir, source))?
+    {
+        Some(status) => status,
+        None => {
+            if let Err(source) = supervisor.stop(STOP_GRACE_PERIOD) {
+                return Err(ReactorError::AgentUnavailable {
+                    agent: agent.as_str().to_owned(),
+                    reason: format!("plan draft timed out; cleanup failed: {source}"),
+                });
             }
-        }
-        if started.elapsed() >= timeout {
-            terminate_process_tree(&mut child);
             return Err(ReactorError::AgentUnavailable {
                 agent: agent.as_str().to_owned(),
                 reason: "plan draft timed out".to_owned(),
             });
         }
-        thread::sleep(Duration::from_millis(50));
     };
     let stdin_result = stdin_receiver.recv_timeout(Duration::from_secs(2));
     if !status.success() {
@@ -164,53 +162,6 @@ fn generate_inner(
     let bytes = input::read_file(output_path)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| ReactorError::InvalidInput(format!("invalid Agent draft: {error}")))
-}
-
-#[cfg(unix)]
-fn isolate_process_tree(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    command.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn isolate_process_tree(_command: &mut Command) {}
-
-#[cfg(unix)]
-fn terminate_process_tree(child: &mut std::process::Child) {
-    // The Agent owns its process group, so descendants receive the same termination.
-    let group = format!("-{}", child.id());
-    let killed = Command::new("kill")
-        .args(["-KILL", "--"])
-        .arg(group)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    if !killed {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-}
-
-#[cfg(windows)]
-fn terminate_process_tree(child: &mut std::process::Child) {
-    let killed = Command::new("taskkill")
-        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    if !killed {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-}
-
-#[cfg(not(any(unix, windows)))]
-fn terminate_process_tree(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn read_agent_error(reader: &mut impl Read) -> String {
