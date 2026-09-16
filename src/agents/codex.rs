@@ -21,15 +21,7 @@ impl AgentAdapter for CodexAdapter {
         let Some(launcher) = Launcher::find() else {
             return Ok(failed("not_installed"));
         };
-        let version_output = match launcher
-            .command([
-                "--strict-config",
-                "--config",
-                "sandbox_workspace_write.network_access=false",
-                "--version",
-            ])
-            .output()
-        {
+        let version_output = match launcher.command(["--version"]).output() {
             Ok(output) if output.status.success() => output,
             _ => return Ok(failed("version_check_failed")),
         };
@@ -49,6 +41,19 @@ impl AgentAdapter for CodexAdapter {
                     "minimum_version": MINIMUM_VERSION
                 }),
             });
+        }
+        let valid_config = launcher
+            .command([
+                "--strict-config",
+                "--config",
+                "sandbox_workspace_write.network_access=false",
+                "--version",
+            ])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !valid_config {
+            return Ok(failed_with_version("configuration_invalid", &version));
         }
 
         let authenticated = launcher
@@ -80,7 +85,11 @@ impl AgentAdapter for CodexAdapter {
         if !non_interactive {
             return Ok(failed_with_version("non_interactive_unsupported", &version));
         }
-        let mcp_supported = root_help.contains("  mcp ");
+        let mcp_supported = launcher
+            .command(["mcp", "--help"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
         let hooks_supported = root_help.contains("--dangerously-bypass-hook-trust");
         if policy.mcp.is_allowed() && !mcp_supported {
             return Ok(failed_with_version("mcp_unsupported", &version));

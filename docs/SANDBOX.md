@@ -53,6 +53,7 @@ hooks: allow
 - `writable_roots`는 등록 시 Canonical Path로 변환한다.
 - `network`, `mcp`, `hooks`는 개별 요청이나 명령 목록이 아닌 Workspace 단위 권한이다.
 - 세 항목은 기본적으로 `allow`이며 필요하면 Workspace별로 `deny`할 수 있다.
+- 이전 Schema에서 이전된 Workspace는 기존 실행 범위를 유지하기 위해 세 항목을 `deny`로 시작한다.
 - 지원하지 않는 항목은 허용된 것처럼 처리하지 않고 준비 또는 실행을 거절한다.
 - 실행 도중 정책을 바꾸지 않는다. 변경된 정책은 다시 준비한 다음 새 Run부터 적용한다.
 - 같은 ID와 경로로 Workspace를 다시 등록하면 정책을 갱신하고 기존 Agent 준비 상태를 무효화한다.
