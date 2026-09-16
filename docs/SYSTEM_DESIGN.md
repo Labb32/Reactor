@@ -91,6 +91,12 @@ workspace add
 
 Trust 변경은 `workspace prepare`에서만 수행하고 감사 이력을 남긴다. Path나 설정이 바뀌면 `DEGRADED`로 전환한다.
 
+## Sandbox
+
+Reactor는 Workspace와 추가 쓰기 경로를 검증하고 이를 Agent 실행 옵션으로 변환한다. 실제 파일·Network·Process 제한은 Agent sandbox가 강제한다. 현재 사용자 환경의 Credential, 도구 설치와 외부 서비스 상태는 Reactor가 관리하지 않는다.
+
+Git과 일반 CLI는 개별 등록 없이 sandbox 안에서 실행한다. Network, MCP와 Project Hook은 Workspace 정책으로 허용하며 Agent가 해당 경계를 강제할 수 있을 때만 사용한다. 자세한 책임 범위는 [SANDBOX.md](SANDBOX.md)를 따른다.
+
 ## Scheduler
 
 Scheduler는 긴 Sleep 하나에 의존하지 않고 가까운 예약과 짧은 최대 간격을 함께 사용한다.
@@ -126,7 +132,7 @@ v1은 Plugin 대신 `AgentKind` Enum과 Codex, Qwen Code, Claude Module을 사�
 
 - Capability와 Preflight
 - Non-interactive Command 생성
-- Sandbox·Full Access Option 변환
+- Workspace 정책을 Sandbox Option으로 변환
 - Process 결과와 사용량 Parsing
 - 가능한 경우 Quota Reset 시각 확인
 

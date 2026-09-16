@@ -94,18 +94,16 @@ concurrency:
 예약 작업은 실행 중 사용자 승인을 기다리지 않는다.
 
 ```yaml
-unattended:
-  mode: sandbox             # sandbox | full_access
-  writable_roots:
-    - /workspaces/example
+writable_roots:
+  - ../shared-library
+network: allow
+mcp: allow
+project_hooks: allow
 ```
 
-- `sandbox`: Agent가 제공하는 기능으로 쓰기 범위를 제한한다.
-- `full_access`: YOLO 또는 승인 우회 모드를 사용한다.
-- 작업 요청은 Workspace 정책보다 높은 권한을 선택할 수 없다.
-- 필요한 권한이 없으면 대기하지 않고 실패 사유를 기록한다.
+Workspace는 항상 기본 쓰기 경로다. Reactor는 허용 범위를 검증하고 Agent의 sandbox 기능으로 강제한다. Git, CLI와 기존 사용자 인증은 별도로 등록하지 않으며 필요한 외부 기능만 Workspace 정책으로 허용한다. 권한이 부족하면 대기하거나 자동으로 확대하지 않고 사유를 기록한다.
 
-Reactor 자체가 OS sandbox를 구현하지는 않는다.
+자세한 책임 범위는 [SANDBOX.md](SANDBOX.md)를 따른다.
 
 ## 실행과 결과
 
@@ -170,4 +168,4 @@ reactor events --after <cursor> --follow --output jsonl
 5. Checkpoint, Diff와 중단 복구
 6. 반복 예약, 한도와 나머지 Agent
 
-자세한 구현 기준은 [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md)를 따른다.
+자세한 구현 기준은 [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md)와 [SANDBOX.md](SANDBOX.md)를 따른다.
