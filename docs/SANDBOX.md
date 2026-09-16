@@ -21,12 +21,12 @@ Reactor는 개별 CLI 명령이나 Git 하위 명령을 등록하지 않는다. 
 
 - 등록된 경로 밖의 파일 쓰기 차단
 - Network 허용 여부의 실제 강제
-- MCP와 Project Hook을 sandbox 안에서 실행
+- MCP와 Hook 실행은 Agent 설정과 sandbox 동작에 맡김
 - CLI와 자식 Process에 같은 sandbox 적용
 - 승인 요청을 만들지 않고 허용되지 않은 작업을 거절
 - 인증 상태, sandbox capability와 실행 결과 제공
 
-Workspace 정책에서 Network, MCP 또는 Project Hook을 허용해도 Agent가 해당 경계를 강제할 수 없으면 그 Agent는 `READY`가 될 수 없다. User Hook처럼 Workspace 검토 범위 밖의 자동 실행 설정은 예약 작업에 사용하지 않는다.
+Workspace 정책에서 Network, MCP 또는 Hook을 허용해도 Agent가 해당 기능을 지원하지 않으면 그 Agent는 `READY`가 될 수 없다. MCP와 Hook의 세부 권한은 Agent 설정의 책임이며, Reactor의 파일 경로 보장은 Agent가 직접 실행하는 작업에 적용된다.
 
 ## Reactor가 별도로 관리하지 않는 부분
 
@@ -47,13 +47,15 @@ writable_roots:
   - ../shared-library
 network: allow
 mcp: allow
-project_hooks: allow
+hooks: allow
 ```
 
 - `writable_roots`는 등록 시 Canonical Path로 변환한다.
-- `network`, `mcp`, `project_hooks`는 개별 요청이나 명령 목록이 아닌 Workspace 단위 권한이다.
+- `network`, `mcp`, `hooks`는 개별 요청이나 명령 목록이 아닌 Workspace 단위 권한이다.
+- 세 항목은 기본적으로 `allow`이며 필요하면 Workspace별로 `deny`할 수 있다.
 - 지원하지 않는 항목은 허용된 것처럼 처리하지 않고 준비 또는 실행을 거절한다.
 - 실행 도중 정책을 바꾸지 않는다. 변경된 정책은 다시 준비한 다음 새 Run부터 적용한다.
+- 같은 ID와 경로로 Workspace를 다시 등록하면 정책을 갱신하고 기존 Agent 준비 상태를 무효화한다.
 
 v1은 Network 목적지, CLI 명령과 Credential별 allowlist를 제공하지 않는다. 세밀한 제한이 필요하면 Network proxy나 격리된 실행 계층을 별도 기능으로 추가한다.
 

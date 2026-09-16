@@ -106,6 +106,33 @@ impl Store {
         })
     }
 
+    pub fn adopt_migrated_workspace_policy(
+        &mut self,
+        id: &str,
+        fingerprint: &str,
+    ) -> Result<WorkspaceRecord> {
+        let now = crate::time::now_utc();
+        self.write_transaction(|transaction| {
+            let changed = transaction.execute(
+                "UPDATE workspaces SET policy_fingerprint = ?1, updated_at = ?2
+                 WHERE id = ?3 AND policy_fingerprint = ''",
+                params![fingerprint, now, id],
+            )?;
+            if changed == 0 {
+                return query_workspace(transaction, id);
+            }
+            write_event(
+                transaction,
+                "WORKSPACE_POLICY_MIGRATED",
+                "workspace",
+                id,
+                serde_json::json!({ "policy_fingerprint": fingerprint }),
+                &now,
+            )?;
+            query_workspace(transaction, id)
+        })
+    }
+
     pub fn mark_workspace_agent_degraded(
         &mut self,
         workspace_id: &str,
@@ -167,26 +194,40 @@ fn insert_workspace(
     policy: &WorkspacePolicy,
     fingerprint: &str,
 ) -> Result<WorkspaceRecord> {
-    let mut statement =
-        transaction.prepare("SELECT id, canonical_key, policy_fingerprint FROM workspaces")?;
+    let mut statement = transaction
+        .prepare("SELECT id, canonical_key, policy_fingerprint, policy_json FROM workspaces")?;
     let locations = statement
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    for (registered_id, registered_key, registered_fingerprint) in locations {
-        if registered_id == id
-            && registered_key == workspace.key
-            && registered_fingerprint == fingerprint
-        {
-            return query_workspace(transaction, id);
+    let requested_keys = policy.write_keys(&workspace.key);
+    let mut existing_fingerprint = None;
+    for (registered_id, registered_key, registered_fingerprint, registered_policy) in locations {
+        if registered_id == id {
+            if registered_key != workspace.key {
+                return Err(ReactorError::WorkspaceOverlap {
+                    workspace_id: registered_id,
+                });
+            }
+            existing_fingerprint = Some(registered_fingerprint);
+            continue;
         }
-        if registered_id == id || paths_overlap(&registered_key, &workspace.key) {
+        let registered_policy: WorkspacePolicy = serde_json::from_str(&registered_policy)
+            .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
+        let registered_keys = registered_policy.write_keys(&registered_key);
+        let overlaps = requested_keys.iter().any(|requested| {
+            registered_keys
+                .iter()
+                .any(|registered| paths_overlap(registered, requested))
+        });
+        if overlaps {
             return Err(ReactorError::WorkspaceOverlap {
                 workspace_id: registered_id,
             });
@@ -196,6 +237,32 @@ fn insert_workspace(
     let now = crate::time::now_utc();
     let policy_json = serde_json::to_string(policy)
         .map_err(|error| ReactorError::InvalidInput(error.to_string()))?;
+    if let Some(existing_fingerprint) = existing_fingerprint {
+        if existing_fingerprint == fingerprint {
+            return query_workspace(transaction, id);
+        }
+        transaction.execute(
+            "UPDATE workspaces
+             SET status = 'REGISTERED', policy_json = ?1, policy_fingerprint = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![policy_json, fingerprint, now, id],
+        )?;
+        transaction.execute(
+            "UPDATE workspace_agents
+             SET status = 'DEGRADED', policy_fingerprint = NULL, checked_at = ?1
+             WHERE workspace_id = ?2",
+            params![now, id],
+        )?;
+        write_event(
+            transaction,
+            "WORKSPACE_POLICY_UPDATED",
+            "workspace",
+            id,
+            serde_json::json!({ "status": "REGISTERED", "policy": policy }),
+            &now,
+        )?;
+        return query_workspace(transaction, id);
+    }
     transaction.execute(
         "INSERT INTO workspaces
          (id, canonical_path, canonical_key, status, policy_json, policy_fingerprint, created_at, updated_at)

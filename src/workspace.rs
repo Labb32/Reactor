@@ -12,16 +12,39 @@ const MAX_POLICY_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AccessMode {
+pub enum PolicyAccess {
+    Deny,
     #[default]
-    Sandbox,
-    FullAccess,
+    Allow,
+}
+
+impl PolicyAccess {
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspacePolicy {
-    pub access: AccessMode,
+    pub writable_roots: Vec<String>,
+    pub network: PolicyAccess,
+    pub mcp: PolicyAccess,
+    pub hooks: PolicyAccess,
+}
+
+impl WorkspacePolicy {
+    pub fn write_paths(&self, workspace: &Path) -> Vec<PathBuf> {
+        std::iter::once(workspace.to_owned())
+            .chain(self.writable_roots.iter().map(PathBuf::from))
+            .collect()
+    }
+
+    pub fn write_keys(&self, workspace_key: &str) -> Vec<String> {
+        std::iter::once(workspace_key.to_owned())
+            .chain(self.writable_roots.iter().map(|path| path_key(path)))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -34,6 +57,13 @@ pub struct WorkspaceRecord {
     pub agents: Vec<WorkspaceAgentRecord>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl WorkspaceRecord {
+    #[allow(dead_code)]
+    pub fn write_paths(&self) -> Vec<PathBuf> {
+        self.policy.write_paths(Path::new(&self.canonical_path))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -66,6 +96,60 @@ pub fn canonicalize(path: &Path) -> Result<CanonicalWorkspace> {
         .to_owned();
     let key = path_key(&display);
     Ok(CanonicalWorkspace { path, display, key })
+}
+
+pub fn normalize_policy(
+    workspace: &CanonicalWorkspace,
+    policy: &WorkspacePolicy,
+) -> Result<WorkspacePolicy> {
+    let mut roots: Vec<CanonicalWorkspace> = Vec::new();
+    for value in &policy.writable_roots {
+        if value.trim().is_empty() {
+            return Err(ReactorError::InvalidSandboxPolicy(
+                "writable root must not be empty".to_owned(),
+            ));
+        }
+        let input = Path::new(value);
+        let input = if input.is_absolute() {
+            input.to_owned()
+        } else {
+            workspace.path.join(input)
+        };
+        let root = canonicalize(&input)?;
+        if root.path.parent().is_none() {
+            return Err(ReactorError::InvalidSandboxPolicy(format!(
+                "filesystem root is not allowed: {}",
+                root.display
+            )));
+        }
+        if root.key == workspace.key || root.path.starts_with(&workspace.path) {
+            continue;
+        }
+        if workspace.path.starts_with(&root.path) {
+            return Err(ReactorError::InvalidSandboxPolicy(format!(
+                "writable root contains the workspace: {}",
+                root.display
+            )));
+        }
+        if roots
+            .iter()
+            .any(|registered| paths_overlap(&registered.key, &root.key))
+        {
+            return Err(ReactorError::InvalidSandboxPolicy(format!(
+                "writable roots overlap: {}",
+                root.display
+            )));
+        }
+        roots.push(root);
+    }
+    roots.sort_by(|left, right| left.key.cmp(&right.key));
+
+    Ok(WorkspacePolicy {
+        writable_roots: roots.into_iter().map(|root| root.display).collect(),
+        network: policy.network,
+        mcp: policy.mcp,
+        hooks: policy.hooks,
+    })
 }
 
 pub fn validate_id(id: &str) -> Result<()> {

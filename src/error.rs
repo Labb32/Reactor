@@ -69,6 +69,9 @@ pub enum ReactorError {
     #[error("workspace path is invalid: {0}")]
     InvalidWorkspacePath(String),
 
+    #[error("sandbox policy is invalid: {0}")]
+    InvalidSandboxPolicy(String),
+
     #[error("workspace overlaps registered workspace {workspace_id}")]
     WorkspaceOverlap { workspace_id: String },
 
@@ -120,7 +123,8 @@ impl ReactorError {
             | Self::InvalidArgument(_)
             | Self::InvalidConcurrency { .. }
             | Self::InvalidWorkspaceId(_)
-            | Self::InvalidWorkspacePath(_) => 2,
+            | Self::InvalidWorkspacePath(_)
+            | Self::InvalidSandboxPolicy(_) => 2,
             Self::UnsupportedSchema { .. }
             | Self::UninitializedDatabase
             | Self::SchemaMigrationRequired { .. } => 3,
@@ -161,6 +165,7 @@ impl ReactorError {
             Self::InvalidRunTransition { .. } => "invalid_run_transition",
             Self::InvalidWorkspaceId(_) => "invalid_workspace_id",
             Self::InvalidWorkspacePath(_) => "invalid_workspace_path",
+            Self::InvalidSandboxPolicy(_) => "invalid_sandbox_policy",
             Self::WorkspaceOverlap { .. } => "workspace_overlap",
             Self::WorkspaceNotFound(_) => "workspace_not_found",
             Self::AgentNotReady { .. } => "agent_not_ready",

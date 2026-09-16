@@ -7,7 +7,7 @@ use crate::{
     input, output,
     output::{Envelope, OutputFormat},
     paths::ReactorPaths,
-    workspace::{WorkspacePolicy, canonicalize, fingerprint, validate_id},
+    workspace::{WorkspacePolicy, canonicalize, fingerprint, normalize_policy, validate_id},
 };
 
 #[derive(Debug, Args)]
@@ -78,6 +78,7 @@ fn workspace_add(format: OutputFormat, arguments: &WorkspaceAddArgs) -> Result<(
         .map(input::read_document::<WorkspacePolicy>)
         .transpose()?
         .unwrap_or_default();
+    let policy = normalize_policy(&workspace, &policy)?;
     let policy_fingerprint = fingerprint(&workspace, &policy, &[])?;
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
@@ -104,7 +105,16 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
             return write_workspace(format, &app.instance_id, &record);
         }
     };
-    let workspace_fingerprint = match fingerprint(&workspace, &record.policy, &[]) {
+    let policy = match normalize_policy(&workspace, &record.policy) {
+        Ok(policy) => policy,
+        Err(_) => {
+            let record = app
+                .store
+                .mark_workspace_degraded(&arguments.workspace_id, "policy_unreadable")?;
+            return write_workspace(format, &app.instance_id, &record);
+        }
+    };
+    let workspace_fingerprint = match fingerprint(&workspace, &policy, &[]) {
         Ok(fingerprint) => fingerprint,
         Err(_) => {
             let record = app
@@ -114,13 +124,18 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
         }
     };
     if workspace_fingerprint != record.policy_fingerprint {
-        let record = app
-            .store
-            .mark_workspace_degraded(&arguments.workspace_id, "policy_changed")?;
-        return write_workspace(format, &app.instance_id, &record);
+        if record.policy_fingerprint.is_empty() {
+            app.store
+                .adopt_migrated_workspace_policy(&arguments.workspace_id, &workspace_fingerprint)?;
+        } else {
+            let record = app
+                .store
+                .mark_workspace_degraded(&arguments.workspace_id, "policy_changed")?;
+            return write_workspace(format, &app.instance_id, &record);
+        }
     }
     let adapter = arguments.agent.adapter();
-    let agent_fingerprint = match fingerprint(&workspace, &record.policy, adapter.policy_files()) {
+    let agent_fingerprint = match fingerprint(&workspace, &policy, adapter.policy_files()) {
         Ok(fingerprint) => fingerprint,
         Err(_) => {
             let preflight = AgentPreflight {
@@ -138,7 +153,7 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
             return write_workspace(format, &app.instance_id, &record);
         }
     };
-    let result = adapter.preflight(&workspace.path)?;
+    let result = adapter.preflight(&workspace.path, &policy)?;
     let record = app.store.record_agent_preflight(
         &arguments.workspace_id,
         arguments.agent.as_str(),
@@ -162,7 +177,16 @@ fn workspace_status(format: OutputFormat, arguments: &WorkspaceIdArgs) -> Result
             return write_workspace(format, &app.instance_id, &record);
         }
     };
-    let current = match fingerprint(&workspace, &record.policy, &[]) {
+    let policy = match normalize_policy(&workspace, &record.policy) {
+        Ok(policy) => policy,
+        Err(_) => {
+            let record = app
+                .store
+                .mark_workspace_degraded(&arguments.workspace_id, "policy_unreadable")?;
+            return write_workspace(format, &app.instance_id, &record);
+        }
+    };
+    let current = match fingerprint(&workspace, &policy, &[]) {
         Ok(fingerprint) => fingerprint,
         Err(_) => {
             let record = app
@@ -192,7 +216,7 @@ fn workspace_status(format: OutputFormat, arguments: &WorkspaceIdArgs) -> Result
             continue;
         };
         let adapter = kind.adapter();
-        let changed = match fingerprint(&workspace, &record.policy, adapter.policy_files()) {
+        let changed = match fingerprint(&workspace, &policy, adapter.policy_files()) {
             Ok(current) => Some(current.as_str()) != agent.policy_fingerprint.as_deref(),
             Err(_) => true,
         };

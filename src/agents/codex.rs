@@ -5,31 +5,11 @@ use semver::Version;
 use crate::{
     agents::{AgentAdapter, AgentCommand, AgentPreflight},
     error::Result,
-    workspace::{AccessMode, WorkspacePolicy},
+    workspace::WorkspacePolicy,
 };
 
 const MINIMUM_VERSION: &str = "0.154.0";
 const POLICY_FILES: &[&str] = &["AGENTS.md", ".codex/config.toml"];
-const ENVIRONMENT_ALLOWLIST: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PROGRAMDATA",
-    "SYSTEMROOT",
-    "WINDIR",
-    "TEMP",
-    "TMP",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "CODEX_HOME",
-    "LANG",
-    "LC_ALL",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-];
-
 pub struct CodexAdapter;
 
 impl AgentAdapter for CodexAdapter {
@@ -37,11 +17,19 @@ impl AgentAdapter for CodexAdapter {
         POLICY_FILES
     }
 
-    fn preflight(&self, workspace: &Path) -> Result<AgentPreflight> {
+    fn preflight(&self, workspace: &Path, policy: &WorkspacePolicy) -> Result<AgentPreflight> {
         let Some(launcher) = Launcher::find() else {
             return Ok(failed("not_installed"));
         };
-        let version_output = match launcher.command(["--version"]).output() {
+        let version_output = match launcher
+            .command([
+                "--strict-config",
+                "--config",
+                "sandbox_workspace_write.network_access=false",
+                "--version",
+            ])
+            .output()
+        {
             Ok(output) if output.status.success() => output,
             _ => return Ok(failed("version_check_failed")),
         };
@@ -85,13 +73,20 @@ impl AgentAdapter for CodexAdapter {
         let non_interactive = root_help.contains("--ask-for-approval")
             && exec_help.contains("--json")
             && exec_help.contains("--sandbox")
-            && exec_help.contains("--ignore-user-config")
+            && exec_help.contains("--add-dir")
             && exec_help.contains("--config")
             && exec_help.contains("--disable")
-            && exec_help.contains("--strict-config")
-            && exec_help.contains("--dangerously-bypass-approvals-and-sandbox");
+            && exec_help.contains("--strict-config");
         if !non_interactive {
             return Ok(failed_with_version("non_interactive_unsupported", &version));
+        }
+        let mcp_supported = root_help.contains("  mcp ");
+        let hooks_supported = root_help.contains("--dangerously-bypass-hook-trust");
+        if policy.mcp.is_allowed() && !mcp_supported {
+            return Ok(failed_with_version("mcp_unsupported", &version));
+        }
+        if policy.hooks.is_allowed() && !hooks_supported {
+            return Ok(failed_with_version("hooks_unsupported", &version));
         }
 
         let trusted_workspace = Command::new("git")
@@ -115,10 +110,11 @@ impl AgentAdapter for CodexAdapter {
                 "non_interactive": true,
                 "git_workspace": true,
                 "sandbox": true,
-                "full_access": true,
-                "user_config_loaded": false,
-                "mcp_enabled": false,
-                "hooks_enabled": false
+                "additional_writable_roots": true,
+                "network_policy": true,
+                "mcp": mcp_supported,
+                "hooks": hooks_supported,
+                "user_config_loaded": true
             }),
         })
     }
@@ -137,27 +133,34 @@ impl AgentAdapter for CodexAdapter {
                 "exec",
                 "--json",
                 "--ephemeral",
-                "--ignore-user-config",
-                "--config",
-                "mcp_servers={}",
-                "--disable",
-                "hooks",
                 "--strict-config",
                 "--color",
                 "never",
+                "--sandbox",
+                "workspace-write",
             ]
             .into_iter()
             .map(OsString::from),
         );
-        match policy.access {
-            AccessMode::Sandbox => arguments.extend(
-                ["--sandbox", "workspace-write"]
-                    .into_iter()
-                    .map(OsString::from),
-            ),
-            AccessMode::FullAccess => {
-                arguments.push("--dangerously-bypass-approvals-and-sandbox".into());
-            }
+        arguments.push("--config".into());
+        arguments.push(
+            format!(
+                "sandbox_workspace_write.network_access={}",
+                policy.network.is_allowed()
+            )
+            .into(),
+        );
+        if !policy.mcp.is_allowed() {
+            arguments.push("--config".into());
+            arguments.push("mcp_servers={}".into());
+        }
+        if !policy.hooks.is_allowed() {
+            arguments.push("--disable".into());
+            arguments.push("hooks".into());
+        }
+        for root in &policy.writable_roots {
+            arguments.push("--add-dir".into());
+            arguments.push(root.into());
         }
         arguments.push("-C".into());
         arguments.push(workspace.as_os_str().to_owned());
@@ -166,7 +169,6 @@ impl AgentAdapter for CodexAdapter {
             program: launcher.program,
             arguments,
             current_dir: workspace.to_owned(),
-            environment_allowlist: ENVIRONMENT_ALLOWLIST,
         })
     }
 }

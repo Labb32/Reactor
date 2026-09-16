@@ -95,7 +95,7 @@ Trust 변경은 `workspace prepare`에서만 수행하고 감사 이력을 남�
 
 Reactor는 Workspace와 추가 쓰기 경로를 검증하고 이를 Agent 실행 옵션으로 변환한다. 실제 파일·Network·Process 제한은 Agent sandbox가 강제한다. 현재 사용자 환경의 Credential, 도구 설치와 외부 서비스 상태는 Reactor가 관리하지 않는다.
 
-Git과 일반 CLI는 개별 등록 없이 sandbox 안에서 실행한다. Network, MCP와 Project Hook은 Workspace 정책으로 허용하며 Agent가 해당 경계를 강제할 수 있을 때만 사용한다. 자세한 책임 범위는 [SANDBOX.md](SANDBOX.md)를 따른다.
+Git과 일반 CLI는 개별 등록 없이 sandbox 안에서 실행한다. Network, MCP와 Hook은 Workspace 정책으로 허용하며 Agent가 해당 기능을 지원할 때만 사용한다. 자세한 책임 범위는 [SANDBOX.md](SANDBOX.md)를 따른다.
 
 ## Scheduler
 

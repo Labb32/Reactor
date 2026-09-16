@@ -13,7 +13,7 @@ use crate::{
 
 mod workspaces;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 3;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_COUNT: i64 = 100_000;
 
@@ -101,8 +101,10 @@ impl Store {
             2 => {
                 transaction.execute_batch(MIGRATION_3)?;
             }
+            3 => {}
             _ => unreachable!("schema version was checked before migration"),
         }
+        transaction.execute_batch(MIGRATION_4)?;
         transaction.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
 
         transaction.commit()?;
@@ -383,3 +385,4 @@ fn reject_newer_schema(found: u32) -> Result<()> {
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_instance_id.sql");
 const MIGRATION_3: &str = include_str!("../migrations/0003_workspace_policy.sql");
+const MIGRATION_4: &str = include_str!("../migrations/0004_project_sandbox.sql");

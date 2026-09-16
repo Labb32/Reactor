@@ -60,7 +60,9 @@ reactor workspace status <workspace_id>
 reactor workspace list
 ```
 
-Only `workspace add` accepts a raw path. The Workspace is always writable and the policy may add writable roots, Network, MCP, and Project Hook access. Codex preparation requires version 0.154.0 or later and records only readiness metadata.
+Only `workspace add` accepts a raw path. The Workspace is always writable. A policy may add `writable_roots` and set `network`, `mcp`, or `hooks` to `allow` or `deny`; access defaults to `allow`. Codex preparation requires version 0.154.0 or later and records only readiness metadata.
+
+Repeating `workspace add` with the same ID and Canonical Path updates its policy, invalidates prior Agent readiness, and requires `workspace prepare` again.
 
 Scheduled Agent commands never request interactive approval. Reactor applies the Workspace policy through the Agent sandbox and rejects unsupported permissions. Existing user credentials remain owned by the Agent and external CLI; Reactor does not store their values.
 

@@ -47,14 +47,16 @@ pub struct AgentCommand {
     pub program: OsString,
     pub arguments: Vec<OsString>,
     pub current_dir: PathBuf,
-    /// Clear inherited variables, then restore only these names.
-    pub environment_allowlist: &'static [&'static str],
 }
 
 pub trait AgentAdapter {
     fn policy_files(&self) -> &'static [&'static str];
 
-    fn preflight(&self, workspace: &std::path::Path) -> Result<AgentPreflight>;
+    fn preflight(
+        &self,
+        workspace: &std::path::Path,
+        policy: &WorkspacePolicy,
+    ) -> Result<AgentPreflight>;
 
     #[allow(dead_code)]
     fn command(

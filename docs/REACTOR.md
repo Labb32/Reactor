@@ -98,7 +98,7 @@ writable_roots:
   - ../shared-library
 network: allow
 mcp: allow
-project_hooks: allow
+hooks: allow
 ```
 
 Workspace는 항상 기본 쓰기 경로다. Reactor는 허용 범위를 검증하고 Agent의 sandbox 기능으로 강제한다. Git, CLI와 기존 사용자 인증은 별도로 등록하지 않으며 필요한 외부 기능만 Workspace 정책으로 허용한다. 권한이 부족하면 대기하거나 자동으로 확대하지 않고 사유를 기록한다.
