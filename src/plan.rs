@@ -205,7 +205,8 @@ fn validate_input(input: &PlanInput) -> Result<()> {
             .any(|criterion| criterion.trim().is_empty() || criterion.len() > 1_000)
     {
         return Err(ReactorError::InvalidPlan(
-            "completion criteria must contain at most 32 non-empty values".to_owned(),
+            "completion criteria must contain at most 32 non-empty values of 1,000 bytes"
+                .to_owned(),
         ));
     }
     if input.limits.max_wall_time_seconds == 0 || input.limits.max_attempts == 0 {

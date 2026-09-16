@@ -155,9 +155,9 @@ pub(super) fn execute(format: OutputFormat, arguments: &PlanArgs) -> Result<()> 
 
 fn draft(format: OutputFormat, arguments: &PlanDraftArgs) -> Result<()> {
     let context = input::read_text(&arguments.file)?;
-    if context.trim().is_empty() {
+    if context.trim().is_empty() || context.len() > 1024 * 1024 {
         return Err(ReactorError::InvalidPlan(
-            "draft context must not be empty".to_owned(),
+            "draft context must contain 1 byte to 1 MiB".to_owned(),
         ));
     }
     let paths = ReactorPaths::discover()?;
@@ -378,15 +378,23 @@ fn run_agent_draft(
         let prompt = format!(
             "Create an execution plan for the request below. Do not modify files or perform the task. Use `workspace` for the primary writable root and list only additional paths that are required. Return only the requested structured output.\n\n<request>\n{context}\n</request>"
         );
-        child
+        let write_result = child
             .stdin
             .take()
             .ok_or_else(|| ReactorError::AgentUnavailable {
                 agent: arguments.agent.as_str().to_owned(),
                 reason: "stdin_unavailable".to_owned(),
-            })?
-            .write_all(prompt.as_bytes())
-            .map_err(|source| io_error("agent stdin", source))?;
+            })
+            .and_then(|mut stdin| {
+                stdin
+                    .write_all(prompt.as_bytes())
+                    .map_err(|source| io_error("agent stdin", source))
+            });
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let output = child
             .wait_with_output()
             .map_err(|source| io_error(&command.current_dir, source))?;
