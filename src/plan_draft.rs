@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    agents::{AgentEnvironment, AgentKind},
+    agents::AgentKind,
     error::{ReactorError, Result, io_error},
     input,
     paths::ReactorPaths,
@@ -93,14 +93,6 @@ fn generate_inner(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    if let AgentEnvironment::Selected(names) = command.environment {
-        process.env_clear();
-        for name in names {
-            if let Some(value) = std::env::var_os(name) {
-                process.env(name, value);
-            }
-        }
-    }
     isolate_process_tree(&mut process);
     let mut child = process
         .spawn()

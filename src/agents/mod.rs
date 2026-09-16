@@ -49,13 +49,6 @@ pub struct AgentCommand {
     pub program: OsString,
     pub arguments: Vec<OsString>,
     pub current_dir: PathBuf,
-    pub environment: AgentEnvironment,
-}
-
-#[derive(Debug)]
-pub enum AgentEnvironment {
-    Inherit,
-    Selected(&'static [&'static str]),
 }
 
 pub trait AgentAdapter {
