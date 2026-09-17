@@ -108,7 +108,7 @@ Git과 일반 CLI는 개별 등록 없이 sandbox 안에서 실행한다. Networ
 Scheduler는 긴 Sleep 하나에 의존하지 않고 가까운 예약과 짧은 최대 간격을 함께 사용한다.
 
 1. 예약 회차를 계산한다.
-2. `start_deadline`이 지난 회차는 `MISSED`로 기록한다.
+2. 실행을 시작하지 못한 채 `start_deadline`이 지난 회차와 Run은 `MISSED`로 기록한다.
 3. 조건을 만족한 회차를 Workspace FIFO Queue에 넣는다.
 4. 빈 Slot이 생기면 Ready Workspace를 Round-robin으로 선택한다.
 5. Workspace 첫 Run이 막히면 다른 Workspace를 확인한다.

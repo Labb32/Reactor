@@ -12,6 +12,7 @@ use crate::{
 };
 
 mod plans;
+mod queue;
 mod schedules;
 mod workspaces;
 
@@ -323,20 +324,17 @@ impl Store {
             )?;
 
             if changed == 1 {
-                transaction.execute(
-                    "INSERT INTO audit_events (event_type, entity_type, entity_id, payload_json, occurred_at)
-                     VALUES ('RUN_STATE_CHANGED', 'run', ?1, ?2, ?3)",
-                    params![
-                        run_id,
-                        serde_json::json!({
-                            "from": expected.as_str(),
-                            "to": next.as_str()
-                        })
-                        .to_string(),
-                        occurred_at
-                    ],
+                write_event(
+                    transaction,
+                    "RUN_STATE_CHANGED",
+                    "run",
+                    run_id,
+                    serde_json::json!({
+                        "from": expected.as_str(),
+                        "to": next.as_str()
+                    }),
+                    occurred_at,
                 )?;
-                prune_events(transaction)?;
             }
 
             Ok(changed == 1)
@@ -394,6 +392,28 @@ fn query_runs(connection: &Connection) -> Result<Vec<RunSnapshot>> {
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(super) fn write_event(
+    transaction: &Transaction<'_>,
+    event_type: &str,
+    entity_type: &str,
+    entity_id: &str,
+    payload: Value,
+    occurred_at: &str,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO audit_events (event_type, entity_type, entity_id, payload_json, occurred_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event_type,
+            entity_type,
+            entity_id,
+            payload.to_string(),
+            occurred_at
+        ],
+    )?;
+    prune_events(transaction)
 }
 
 fn prune_events(transaction: &Transaction<'_>) -> Result<()> {

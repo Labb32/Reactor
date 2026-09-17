@@ -119,7 +119,7 @@ start_deadline_seconds: 3600
 
 Rule types are `immediate`, `manual`, and `at`. An `at` rule interprets `local_time` in the current user time zone captured when the schedule is created. Reactor stores its IANA name when available and otherwise stores the current UTC offset. A DST gap moves to the next valid local time; a repeated local time selects its first occurrence. A paused occurrence remains pending and becomes `MISSED` if its deadline has passed when resumed.
 
-`queue list` refreshes due occurrences and reports each queued Run with `eligible`, `dispatch_order`, and `blocked_by`. Dispatch uses Workspace FIFO, Workspace round-robin, one active Run per Workspace, and the configured global, Agent, Provider, and local endpoint limits.
+`queue list` refreshes due occurrences and reports each queued Run with `eligible`, `dispatch_order`, and `blocked_by`. A Run that remains queued past its start deadline becomes `MISSED`. Dispatch uses Workspace FIFO, Workspace round-robin, one active Run per Workspace, and the configured global, Agent, Provider, and local endpoint limits.
 
 ## Events
 

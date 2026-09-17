@@ -122,10 +122,14 @@ fn validate(input: &ScheduleInput) -> Result<()> {
         ));
     }
     if input.local_endpoint.as_deref().is_some_and(|value| {
-        value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+        value.trim().is_empty()
+            || value != value.trim()
+            || value.len() > 128
+            || value.chars().any(char::is_control)
     }) {
         return Err(ReactorError::InvalidSchedule(
-            "local endpoint must contain 1 to 128 bytes without control characters".to_owned(),
+            "local endpoint must contain 1 to 128 bytes without surrounding whitespace or control characters"
+                .to_owned(),
         ));
     }
     if let ScheduleRule::At { local_time } = &input.rule

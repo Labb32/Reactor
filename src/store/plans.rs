@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use super::{Store, prune_events};
+use super::{Store, write_event};
 use crate::{
     domain::PlanStatus,
     error::{ReactorError, Result},
@@ -124,6 +124,7 @@ fn insert_plan(transaction: &Transaction<'_>, id: &str, input: &PlanInput) -> Re
     write_event(
         transaction,
         "PLAN_CREATED",
+        "plan",
         id,
         serde_json::json!({ "version": 1, "status": "DRAFT" }),
         &now,
@@ -158,6 +159,7 @@ fn revise_plan(
     write_event(
         transaction,
         "PLAN_REVISED",
+        "plan",
         plan_id,
         serde_json::json!({ "version": version, "status": "DRAFT" }),
         &now,
@@ -238,6 +240,7 @@ fn transition_plan(
         write_event(
             transaction,
             "PLAN_STATE_CHANGED",
+            "plan",
             plan_id,
             serde_json::json!({
                 "version": current.current_version,
@@ -309,6 +312,7 @@ fn approve_plan(
     write_event(
         transaction,
         "PLAN_APPROVED",
+        "plan",
         plan_id,
         serde_json::json!({
             "version": current.current_version,
@@ -455,19 +459,4 @@ fn to_json(value: &impl serde::Serialize) -> Result<String> {
 
 fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T> {
     serde_json::from_str(value).map_err(|error| ReactorError::InvalidStoredData(error.to_string()))
-}
-
-fn write_event(
-    transaction: &Transaction<'_>,
-    event_type: &str,
-    plan_id: &str,
-    payload: serde_json::Value,
-    occurred_at: &str,
-) -> Result<()> {
-    transaction.execute(
-        "INSERT INTO audit_events (event_type, entity_type, entity_id, payload_json, occurred_at)
-         VALUES (?1, 'plan', ?2, ?3, ?4)",
-        params![event_type, plan_id, payload.to_string(), occurred_at],
-    )?;
-    prune_events(transaction)
 }

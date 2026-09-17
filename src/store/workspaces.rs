@@ -1,7 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde_json::Value;
 
-use super::{Store, prune_events};
+use super::{Store, write_event};
 use crate::{
     agents::AgentPreflight,
     error::{ReactorError, Result},
@@ -386,26 +385,4 @@ fn query_workspace_agents(
         })
     })
     .collect()
-}
-
-fn write_event(
-    transaction: &Transaction<'_>,
-    event_type: &str,
-    entity_type: &str,
-    entity_id: &str,
-    payload: Value,
-    occurred_at: &str,
-) -> Result<()> {
-    transaction.execute(
-        "INSERT INTO audit_events (event_type, entity_type, entity_id, payload_json, occurred_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            event_type,
-            entity_type,
-            entity_id,
-            payload.to_string(),
-            occurred_at
-        ],
-    )?;
-    prune_events(transaction)
 }

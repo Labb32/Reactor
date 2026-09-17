@@ -229,10 +229,13 @@ fn validate_input(input: &PlanInput) -> Result<()> {
 
 fn validate_optional_name(field: &str, value: Option<&str>) -> Result<()> {
     if value.is_some_and(|value| {
-        value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+        value.trim().is_empty()
+            || value != value.trim()
+            || value.len() > 128
+            || value.chars().any(char::is_control)
     }) {
         return Err(ReactorError::InvalidPlan(format!(
-            "{field} must contain 1 to 128 bytes without control characters"
+            "{field} must contain 1 to 128 bytes without surrounding whitespace or control characters"
         )));
     }
     Ok(())

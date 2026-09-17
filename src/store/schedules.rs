@@ -1,16 +1,12 @@
-use std::collections::{HashMap, HashSet};
-
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 
-use super::{Store, prune_events};
+use super::{Store, write_event};
 use crate::{
-    config::ConcurrencyConfig,
     domain::PlanStatus,
     error::{ReactorError, Result},
     schedule::{
-        OccurrenceRecord, PreparedSchedule, QueueRun, ScheduleInput, ScheduleRecord, ScheduleRule,
-        deadline,
+        OccurrenceRecord, PreparedSchedule, ScheduleInput, ScheduleRecord, ScheduleRule, deadline,
     },
 };
 
@@ -46,7 +42,7 @@ impl Store {
         self.ensure_supported_schema()?;
         let mut statement = self
             .connection
-            .prepare("SELECT id FROM schedules ORDER BY julianday(created_at), id")?;
+            .prepare("SELECT id FROM schedules ORDER BY julianday(created_at), rowid")?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -86,51 +82,6 @@ impl Store {
 
     pub fn refresh_due_schedules(&mut self) -> Result<u32> {
         self.write_transaction(refresh_due)
-    }
-
-    pub fn queue(&self, config: &ConcurrencyConfig) -> Result<Vec<QueueRun>> {
-        self.ensure_supported_schema()?;
-        evaluate_queue(&self.connection, config)
-    }
-
-    #[allow(dead_code)]
-    pub fn claim_next_run(&mut self, config: &ConcurrencyConfig) -> Result<Option<QueueRun>> {
-        self.write_transaction(|transaction| {
-            let selected = evaluate_queue(transaction, config)?
-                .into_iter()
-                .filter(|run| run.eligible)
-                .min_by_key(|run| run.dispatch_order);
-            let Some(mut run) = selected else {
-                return Ok(None);
-            };
-            let now = crate::time::now_utc();
-            let changed = transaction.execute(
-                "UPDATE runs SET state = 'PREPARING', updated_at = ?1
-                 WHERE id = ?2 AND state = 'QUEUED'",
-                params![now, run.id],
-            )?;
-            if changed == 0 {
-                return Ok(None);
-            }
-            transaction.execute(
-                "INSERT INTO reactor_meta (key, value) VALUES ('queue_last_workspace', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [&run.workspace_id],
-            )?;
-            write_event(
-                transaction,
-                "RUN_STATE_CHANGED",
-                "run",
-                &run.id,
-                serde_json::json!({ "from": "QUEUED", "to": "PREPARING" }),
-                &now,
-            )?;
-            run.state = "PREPARING".to_owned();
-            run.eligible = false;
-            run.dispatch_order = None;
-            run.blocked_by = None;
-            Ok(Some(run))
-        })
     }
 }
 
@@ -277,7 +228,7 @@ fn transition_schedule(
     }
 }
 
-fn refresh_due(transaction: &Transaction<'_>) -> Result<u32> {
+pub(super) fn refresh_due(transaction: &Transaction<'_>) -> Result<u32> {
     let now = jiff::Timestamp::now();
     let now_text = now.to_string();
     let mut statement = transaction.prepare(
@@ -286,7 +237,7 @@ fn refresh_due(transaction: &Transaction<'_>) -> Result<u32> {
          JOIN schedules s ON s.id = so.schedule_id
          WHERE so.state = 'WAITING' AND s.status = 'ACTIVE'
            AND julianday(so.scheduled_at) <= julianday(?1)
-         ORDER BY julianday(so.scheduled_at), julianday(so.created_at), so.id",
+         ORDER BY julianday(so.scheduled_at), julianday(so.created_at), so.rowid",
     )?;
     let due = statement
         .query_map([&now_text], |row| {
@@ -297,7 +248,75 @@ fn refresh_due(transaction: &Transaction<'_>) -> Result<u32> {
     for (schedule_id, occurrence_id) in &due {
         materialize_occurrence(transaction, schedule_id, occurrence_id, now)?;
     }
-    Ok(due.len() as u32)
+    let expired = expire_queued_runs(transaction, &now_text)?;
+    u32::try_from(due.len() + expired)
+        .map_err(|_| ReactorError::InvalidStoredData("too many schedule updates".to_owned()))
+}
+
+fn expire_queued_runs(transaction: &Transaction<'_>, now: &str) -> Result<usize> {
+    let mut statement = transaction.prepare(
+        "SELECT r.id, so.id, so.schedule_id
+         FROM runs r
+         JOIN schedule_occurrences so ON so.id = r.occurrence_id
+         WHERE r.state = 'QUEUED' AND so.state = 'QUEUED'
+           AND so.deadline_at IS NOT NULL
+           AND julianday(so.deadline_at) < julianday(?1)
+         ORDER BY julianday(so.deadline_at), r.rowid",
+    )?;
+    let expired = statement
+        .query_map([now], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    let mut changed = 0;
+    for (run_id, occurrence_id, schedule_id) in expired {
+        if transaction.execute(
+            "UPDATE runs SET state = 'MISSED', updated_at = ?1
+             WHERE id = ?2 AND state = 'QUEUED'",
+            params![now, run_id],
+        )? == 0
+        {
+            continue;
+        }
+        let occurrence_changed = transaction.execute(
+            "UPDATE schedule_occurrences SET state = 'MISSED'
+             WHERE id = ?1 AND state = 'QUEUED'",
+            [&occurrence_id],
+        )?;
+        if occurrence_changed != 1 {
+            return Err(ReactorError::InvalidStoredData(
+                "queued occurrence changed unexpectedly".to_owned(),
+            ));
+        }
+        write_event(
+            transaction,
+            "RUN_STATE_CHANGED",
+            "run",
+            &run_id,
+            serde_json::json!({
+                "from": "QUEUED",
+                "to": "MISSED",
+                "reason": "start_deadline"
+            }),
+            now,
+        )?;
+        write_event(
+            transaction,
+            "SCHEDULE_OCCURRENCE_MISSED",
+            "schedule",
+            &schedule_id,
+            serde_json::json!({ "occurrence_id": occurrence_id, "run_id": run_id }),
+            now,
+        )?;
+        changed += 1;
+    }
+    Ok(changed)
 }
 
 fn materialize_occurrence(
@@ -307,10 +326,11 @@ fn materialize_occurrence(
     now: jiff::Timestamp,
 ) -> Result<()> {
     let schedule = query_schedule(transaction, schedule_id)?;
-    let occurrence = schedule.occurrence.ok_or_else(|| {
-        ReactorError::InvalidStoredData("schedule occurrence is missing".to_owned())
-    })?;
-    if occurrence.id != occurrence_id || occurrence.state != "WAITING" {
+    let occurrence =
+        query_occurrence_by_id(transaction, schedule_id, occurrence_id)?.ok_or_else(|| {
+            ReactorError::InvalidStoredData("schedule occurrence is missing".to_owned())
+        })?;
+    if occurrence.state != "WAITING" {
         return Ok(());
     }
     let deadline = occurrence
@@ -361,11 +381,16 @@ fn materialize_occurrence(
             now_text
         ],
     )?;
-    transaction.execute(
+    let changed = transaction.execute(
         "UPDATE schedule_occurrences SET state = 'QUEUED', run_id = ?1
          WHERE id = ?2 AND state = 'WAITING'",
         params![run_id, occurrence_id],
     )?;
+    if changed != 1 {
+        return Err(ReactorError::InvalidStoredData(
+            "waiting occurrence changed unexpectedly".to_owned(),
+        ));
+    }
     complete_schedule(transaction, schedule_id, &now_text)?;
     write_event(
         transaction,
@@ -425,137 +450,6 @@ fn complete_schedule(
         "UPDATE schedules SET status = 'COMPLETED', updated_at = ?1 WHERE id = ?2",
         params![updated_at, schedule_id],
     )?;
-    Ok(())
-}
-
-fn evaluate_queue(connection: &Connection, config: &ConcurrencyConfig) -> Result<Vec<QueueRun>> {
-    let mut runs = query_queued_runs(connection)?;
-    let active = query_active_runs(connection)?;
-    let active_workspaces: HashSet<&str> =
-        active.iter().map(|run| run.workspace_id.as_str()).collect();
-    let mut agent_counts = counts(active.iter().map(|run| run.agent_kind.clone()));
-    let mut provider_counts = counts(active.iter().filter_map(|run| run.provider.clone()));
-    let mut endpoint_counts = counts(active.iter().filter_map(|run| run.local_endpoint.clone()));
-    let mut active_count = active.len();
-    let mut heads = Vec::new();
-    let mut seen = HashSet::new();
-    for (index, run) in runs.iter_mut().enumerate() {
-        if !seen.insert(run.workspace_id.clone()) {
-            run.blocked_by = Some("workspace_fifo".to_owned());
-        } else if active_workspaces.contains(run.workspace_id.as_str()) {
-            run.blocked_by = Some("workspace_active".to_owned());
-        } else {
-            heads.push(index);
-        }
-    }
-    rotate_after_last_workspace(connection, &runs, &mut heads)?;
-
-    let mut dispatch_order = 0;
-    for index in heads {
-        let run = &mut runs[index];
-        let blocked = if active_count >= usize::from(config.global) {
-            Some("global_limit")
-        } else if count_of(&agent_counts, &run.agent_kind) >= usize::from(config.per_agent) {
-            Some("agent_limit")
-        } else if run.provider.as_ref().is_some_and(|provider| {
-            count_of(&provider_counts, provider) >= usize::from(config.per_provider)
-        }) {
-            Some("provider_limit")
-        } else if run.local_endpoint.as_ref().is_some_and(|endpoint| {
-            count_of(&endpoint_counts, endpoint) >= usize::from(config.per_local_endpoint)
-        }) {
-            Some("local_endpoint_limit")
-        } else {
-            None
-        };
-        if let Some(blocked) = blocked {
-            run.blocked_by = Some(blocked.to_owned());
-            continue;
-        }
-        run.eligible = true;
-        run.dispatch_order = Some(dispatch_order);
-        dispatch_order += 1;
-        active_count += 1;
-        increment(&mut agent_counts, run.agent_kind.clone());
-        if let Some(provider) = &run.provider {
-            increment(&mut provider_counts, provider.clone());
-        }
-        if let Some(endpoint) = &run.local_endpoint {
-            increment(&mut endpoint_counts, endpoint.clone());
-        }
-    }
-    Ok(runs)
-}
-
-fn query_queued_runs(connection: &Connection) -> Result<Vec<QueueRun>> {
-    let mut statement = connection.prepare(
-        "SELECT id, workspace_id, state, agent_kind, provider, local_endpoint, ready_at, created_at
-         FROM runs WHERE state = 'QUEUED'
-         ORDER BY julianday(ready_at), julianday(created_at), id",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok(QueueRun {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            state: row.get(2)?,
-            agent_kind: row.get(3)?,
-            provider: row.get(4)?,
-            local_endpoint: row.get(5)?,
-            ready_at: row.get(6)?,
-            created_at: row.get(7)?,
-            eligible: false,
-            dispatch_order: None,
-            blocked_by: None,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn query_active_runs(connection: &Connection) -> Result<Vec<QueueRun>> {
-    let mut statement = connection.prepare(
-        "SELECT id, workspace_id, state, agent_kind, provider, local_endpoint, ready_at, created_at
-         FROM runs WHERE state IN ('PREPARING', 'RUNNING')
-         ORDER BY julianday(created_at), id",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok(QueueRun {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            state: row.get(2)?,
-            agent_kind: row.get(3)?,
-            provider: row.get(4)?,
-            local_endpoint: row.get(5)?,
-            ready_at: row.get(6)?,
-            created_at: row.get(7)?,
-            eligible: false,
-            dispatch_order: None,
-            blocked_by: None,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn rotate_after_last_workspace(
-    connection: &Connection,
-    runs: &[QueueRun],
-    heads: &mut [usize],
-) -> Result<()> {
-    let last: Option<String> = connection
-        .query_row(
-            "SELECT value FROM reactor_meta WHERE key = 'queue_last_workspace'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(last) = last else {
-        return Ok(());
-    };
-    if let Some(position) = heads
-        .iter()
-        .position(|index| runs[*index].workspace_id == last)
-    {
-        heads.rotate_left(position + 1);
-    }
     Ok(())
 }
 
@@ -621,13 +515,13 @@ fn query_schedule(connection: &Connection, schedule_id: &str) -> Result<Schedule
         start_deadline,
         start_deadline_seconds: gate.start_deadline_seconds,
         local_endpoint: gate.local_endpoint,
-        occurrence: query_occurrence(connection, schedule_id)?,
+        occurrence: query_latest_occurrence(connection, schedule_id)?,
         created_at,
         updated_at,
     })
 }
 
-fn query_occurrence(
+fn query_latest_occurrence(
     connection: &Connection,
     schedule_id: &str,
 ) -> Result<Option<OccurrenceRecord>> {
@@ -635,20 +529,37 @@ fn query_occurrence(
         .query_row(
             "SELECT id, scheduled_at, deadline_at, state, run_id, created_at
              FROM schedule_occurrences WHERE schedule_id = ?1
-             ORDER BY julianday(created_at) DESC, id DESC LIMIT 1",
+             ORDER BY rowid DESC LIMIT 1",
             [schedule_id],
-            |row| {
-                Ok(OccurrenceRecord {
-                    id: row.get(0)?,
-                    scheduled_at: row.get(1)?,
-                    deadline_at: row.get(2)?,
-                    state: row.get(3)?,
-                    run_id: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            },
+            map_occurrence,
         )
         .optional()?)
+}
+
+fn query_occurrence_by_id(
+    connection: &Connection,
+    schedule_id: &str,
+    occurrence_id: &str,
+) -> Result<Option<OccurrenceRecord>> {
+    Ok(connection
+        .query_row(
+            "SELECT id, scheduled_at, deadline_at, state, run_id, created_at
+             FROM schedule_occurrences WHERE id = ?1 AND schedule_id = ?2",
+            params![occurrence_id, schedule_id],
+            map_occurrence,
+        )
+        .optional()?)
+}
+
+fn map_occurrence(row: &Row<'_>) -> rusqlite::Result<OccurrenceRecord> {
+    Ok(OccurrenceRecord {
+        id: row.get(0)?,
+        scheduled_at: row.get(1)?,
+        deadline_at: row.get(2)?,
+        state: row.get(3)?,
+        run_id: row.get(4)?,
+        created_at: row.get(5)?,
+    })
 }
 
 fn invalid_transition(schedule: &ScheduleRecord, next: &str) -> ReactorError {
@@ -657,22 +568,6 @@ fn invalid_transition(schedule: &ScheduleRecord, next: &str) -> ReactorError {
         from: schedule.status.clone(),
         to: next.to_owned(),
     }
-}
-
-fn counts<K: std::hash::Hash + Eq>(values: impl Iterator<Item = K>) -> HashMap<K, usize> {
-    let mut counts = HashMap::new();
-    for value in values {
-        increment(&mut counts, value);
-    }
-    counts
-}
-
-fn increment<K: std::hash::Hash + Eq>(counts: &mut HashMap<K, usize>, key: K) {
-    *counts.entry(key).or_default() += 1;
-}
-
-fn count_of<K: std::hash::Hash + Eq>(counts: &HashMap<K, usize>, key: &K) -> usize {
-    counts.get(key).copied().unwrap_or_default()
 }
 
 fn request_bytes<T: Serialize>(operation: &str, id: Option<&str>, input: &T) -> Result<Vec<u8>> {
@@ -690,26 +585,4 @@ fn to_json(value: &impl Serialize) -> Result<String> {
 
 fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T> {
     serde_json::from_str(value).map_err(|error| ReactorError::InvalidStoredData(error.to_string()))
-}
-
-fn write_event(
-    transaction: &Transaction<'_>,
-    event_type: &str,
-    entity_type: &str,
-    entity_id: &str,
-    payload: serde_json::Value,
-    occurred_at: &str,
-) -> Result<()> {
-    transaction.execute(
-        "INSERT INTO audit_events (event_type, entity_type, entity_id, payload_json, occurred_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            event_type,
-            entity_type,
-            entity_id,
-            payload.to_string(),
-            occurred_at
-        ],
-    )?;
-    prune_events(transaction)
 }
