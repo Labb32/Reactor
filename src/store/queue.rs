@@ -49,8 +49,8 @@ impl Store {
             )?;
             transaction.execute(
                 "INSERT INTO leases (resource_type, resource_id, owner_id, acquired_at, expires_at)
-                 VALUES ('run', ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+5 seconds'))",
-                params![run.id, owner_id, now],
+                 VALUES ('run', ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?4))",
+                params![run.id, owner_id, now, super::RUN_LEASE_DURATION],
             )?;
             run.state = "PREPARING".to_owned();
             run.eligible = false;
@@ -152,7 +152,14 @@ fn query_queued_runs(connection: &Connection) -> Result<Vec<QueueRun>> {
 fn query_active_runs(connection: &Connection) -> Result<Vec<QueueRun>> {
     let mut statement = connection.prepare(
         "SELECT id, workspace_id, state, agent_kind, provider, local_endpoint, ready_at, created_at
-         FROM runs WHERE state IN ('PREPARING', 'RUNNING')
+         FROM runs
+         WHERE state IN ('PREPARING', 'RUNNING')
+            OR EXISTS (
+                SELECT 1 FROM leases
+                WHERE resource_type = 'run'
+                  AND resource_id = runs.id
+                  AND julianday(expires_at) > julianday('now')
+            )
          ORDER BY julianday(created_at), rowid",
     )?;
     let rows = statement.query_map([], map_run)?;

@@ -9,6 +9,8 @@ use crate::{
     workspace::WorkspacePolicy,
 };
 
+const MAX_EVENT_CHANGED_FILES: usize = 100;
+
 impl Store {
     pub fn get_run(&self, run_id: &str) -> Result<RunRecord> {
         self.ensure_supported_schema()?;
@@ -189,10 +191,36 @@ impl Store {
     pub(crate) fn heartbeat_run(&self, run_id: &str, owner_id: &str) -> Result<bool> {
         self.ensure_supported_schema()?;
         Ok(self.connection.execute(
-            "UPDATE leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+5 seconds')
+            "UPDATE leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3)
+             WHERE resource_type = 'run' AND resource_id = ?1 AND owner_id = ?2",
+            params![run_id, owner_id, super::RUN_LEASE_DURATION],
+        )? == 1)
+    }
+
+    pub(crate) fn claim_run_lease(&self, run_id: &str, owner_id: &str) -> Result<bool> {
+        self.ensure_supported_schema()?;
+        let now = crate::time::now_utc();
+        Ok(self.connection.execute(
+            "INSERT INTO leases (resource_type, resource_id, owner_id, acquired_at, expires_at)
+             VALUES ('run', ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?4))
+             ON CONFLICT(resource_type, resource_id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                acquired_at = excluded.acquired_at,
+                expires_at = excluded.expires_at
+             WHERE leases.owner_id = excluded.owner_id
+                OR julianday(leases.expires_at) <= julianday('now')",
+            params![run_id, owner_id, now, super::RUN_LEASE_DURATION],
+        )? == 1)
+    }
+
+    pub(crate) fn release_run(&self, run_id: &str, owner_id: &str) -> Result<()> {
+        self.ensure_supported_schema()?;
+        self.connection.execute(
+            "DELETE FROM leases
              WHERE resource_type = 'run' AND resource_id = ?1 AND owner_id = ?2",
             params![run_id, owner_id],
-        )? == 1)
+        )?;
+        Ok(())
     }
 
     pub(crate) fn finish_run(
@@ -244,10 +272,6 @@ impl Store {
                     ));
                 }
             }
-            transaction.execute(
-                "DELETE FROM leases WHERE resource_type = 'run' AND resource_id = ?1",
-                [run_id],
-            )?;
             write_event(
                 transaction,
                 "RUN_STATE_CHANGED",
@@ -271,6 +295,13 @@ impl Store {
     ) -> Result<RunRecord> {
         self.write_transaction(|transaction| {
             let run = query_run(transaction, run_id)?;
+            if run.result.is_some() {
+                transaction.execute(
+                    "DELETE FROM leases WHERE resource_type = 'run' AND resource_id = ?1",
+                    [run_id],
+                )?;
+                return Ok(run);
+            }
             let state = parse_state(&run.state)?;
             if !state.is_terminal() {
                 return Err(ReactorError::InvalidArgument(
@@ -303,6 +334,22 @@ impl Store {
                     summary
                 ],
             )?;
+            transaction.execute(
+                "DELETE FROM leases WHERE resource_type = 'run' AND resource_id = ?1",
+                [run_id],
+            )?;
+            let changed_files = result
+                .changed_files
+                .iter()
+                .take(MAX_EVENT_CHANGED_FILES)
+                .map(|change| {
+                    serde_json::json!({
+                        "root": change.root,
+                        "path": change.path,
+                        "change": change.change
+                    })
+                })
+                .collect::<Vec<_>>();
             write_event(
                 transaction,
                 "RUN_RESULT_RECORDED",
@@ -311,7 +358,8 @@ impl Store {
                 serde_json::json!({
                     "state": run.state,
                     "changed_file_count": result.changed_files.len(),
-                    "changed_files": result.changed_files.iter().map(|change| &change.path).collect::<Vec<_>>()
+                    "changed_files": changed_files,
+                    "omitted_file_count": result.changed_files.len().saturating_sub(MAX_EVENT_CHANGED_FILES)
                 }),
                 &result.completed_at,
             )?;
@@ -319,7 +367,7 @@ impl Store {
         })
     }
 
-    pub(crate) fn recover_interrupted_runs(&mut self) -> Result<Vec<RunRecord>> {
+    pub(crate) fn recover_interrupted_runs(&mut self, owner_id: &str) -> Result<Vec<RunRecord>> {
         self.write_transaction(|transaction| {
             let mut statement = transaction.prepare(
                 "SELECT runs.id FROM runs
@@ -346,8 +394,15 @@ impl Store {
                     params![now, run_id],
                 )?;
                 transaction.execute(
-                    "DELETE FROM leases WHERE resource_type = 'run' AND resource_id = ?1",
-                    [&run_id],
+                    "INSERT INTO leases
+                     (resource_type, resource_id, owner_id, acquired_at, expires_at)
+                     VALUES ('run', ?1, ?2, ?3,
+                             strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?4))
+                     ON CONFLICT(resource_type, resource_id) DO UPDATE SET
+                        owner_id = excluded.owner_id,
+                        acquired_at = excluded.acquired_at,
+                        expires_at = excluded.expires_at",
+                    params![run_id, owner_id, now, super::RUN_LEASE_DURATION],
                 )?;
                 write_event(
                     transaction,
@@ -365,23 +420,6 @@ impl Store {
             }
             Ok(recovered)
         })
-    }
-
-    pub(crate) fn runs_without_results(&self) -> Result<Vec<RunRecord>> {
-        self.ensure_supported_schema()?;
-        let mut statement = self.connection.prepare(
-            "SELECT runs.id FROM runs
-             LEFT JOIN run_results ON run_results.run_id = runs.id
-             WHERE runs.state IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'LIMIT_REACHED', 'REVIEW_REQUIRED')
-               AND run_results.run_id IS NULL
-             ORDER BY julianday(runs.updated_at), runs.rowid",
-        )?;
-        let ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ids.into_iter()
-            .map(|id| query_run(&self.connection, &id))
-            .collect()
     }
 }
 

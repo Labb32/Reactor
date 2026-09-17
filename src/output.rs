@@ -53,6 +53,17 @@ pub fn write_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
+pub fn escape_control(value: &str) -> String {
+    value.chars().fold(String::new(), |mut output, character| {
+        if character.is_control() {
+            output.extend(character.escape_default());
+        } else {
+            output.push(character);
+        }
+        output
+    })
+}
+
 pub fn write_error(
     format: OutputFormat,
     instance_id: Option<&str>,

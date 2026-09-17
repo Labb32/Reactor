@@ -134,7 +134,6 @@ reactor run diff <run_id>
 reactor run list
 reactor run cancel <run_id> [--idempotency-key <key>]
 reactor run retry <run_id> [--idempotency-key <key>]
-reactor run recover
 ```
 
 `run next` claims and executes one eligible Run. It blocks until the Agent exits, the wall-time limit is reached, or another process requests cancellation. Cancellation stops the Agent process tree, waits up to three seconds, collects the remaining output, and then records `CANCELLED`.
@@ -143,9 +142,9 @@ reactor run recover
 
 Attempt logs are stored under Reactor's data directory, rotate at 10 MiB, retain at most five files, and expire after 30 days. Sandbox permission failures become `REVIEW_REQUIRED`; Reactor does not widen the approved policy automatically.
 
-Each claimed Run records its Workspace and writable roots before and after execution. Text files up to 1 MiB receive a unified diff; binary and larger files retain hashes and sizes. `.gitignore` and `.reactorignore` apply, and symlinks are not followed. Only the latest diff is retained per Workspace.
+Each claimed Run records its Workspace and writable roots before and after execution. Text files up to 1 MiB receive a unified diff; binary and larger files retain hashes and sizes. A snapshot accepts 250,000 files and embeds up to 64 MiB of text; remaining text retains hashes and sizes. `.gitignore` and `.reactorignore` apply, and symlinks are not followed. Only the latest diff is retained per Workspace.
 
-`run recover` changes interrupted `PREPARING` or `RUNNING` Runs with expired execution leases to `REVIEW_REQUIRED` and completes their pending diff. It never reattaches to or restarts an Agent process. A service host runs recovery before dispatching new work.
+At startup, the service changes interrupted `PREPARING` or `RUNNING` Runs with expired execution leases to `REVIEW_REQUIRED` and completes their pending diff. It never reattaches to or restarts an Agent process.
 
 ## Events
 

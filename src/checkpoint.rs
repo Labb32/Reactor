@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -17,6 +17,9 @@ use crate::{
 };
 
 const TEXT_LIMIT: u64 = 1024 * 1024;
+const MANIFEST_TEXT_LIMIT: u64 = 64 * 1024 * 1024;
+const MANIFEST_FILE_LIMIT: usize = 250_000;
+const ARTIFACT_LIMIT: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Manifest {
@@ -74,6 +77,12 @@ pub fn begin(
     workspace_id: &str,
     roots: &[PathBuf],
 ) -> Result<()> {
+    if uuid::Uuid::parse_str(run_id).is_err() {
+        return Err(ReactorError::InvalidStoredData(
+            "checkpoint run ID is invalid".to_owned(),
+        ));
+    }
+    crate::workspace::validate_id(workspace_id)?;
     let manifest = capture(run_id, workspace_id, roots)?;
     write_json(&pending_path(paths, run_id), &manifest)
 }
@@ -81,6 +90,12 @@ pub fn begin(
 pub fn finish(paths: &ReactorPaths, run_id: &str, state: &str) -> Result<RunResult> {
     let pending = pending_path(paths, run_id);
     let before: Manifest = read_json(&pending)?;
+    if before.run_id != run_id {
+        return Err(ReactorError::InvalidStoredData(
+            "checkpoint run ID does not match".to_owned(),
+        ));
+    }
+    crate::workspace::validate_id(&before.workspace_id)?;
     let roots = before
         .roots
         .iter()
@@ -101,7 +116,6 @@ pub fn finish(paths: &ReactorPaths, run_id: &str, state: &str) -> Result<RunResu
         .join(format!("{}.json", before.workspace_id));
     write_json(&diff_path, &report)?;
     write_json(&manifest_path, &after)?;
-    fs::remove_file(&pending).map_err(|source| io_error(&pending, source))?;
 
     Ok(RunResult {
         state: state.to_owned(),
@@ -119,25 +133,74 @@ pub fn finish(paths: &ReactorPaths, run_id: &str, state: &str) -> Result<RunResu
     })
 }
 
-pub fn read_diff(result: &RunResult) -> Result<DiffReport> {
-    read_json(Path::new(&result.diff_path))
+pub fn complete(paths: &ReactorPaths, run_id: &str) -> Result<()> {
+    let pending = pending_path(paths, run_id);
+    match fs::remove_file(&pending) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_error(pending, source)),
+    }
+}
+
+pub fn read_diff(paths: &ReactorPaths, result: &RunResult) -> Result<DiffReport> {
+    let path = Path::new(&result.diff_path);
+    if path.parent() != Some(paths.data_dir.join("diffs").as_path()) {
+        return Err(ReactorError::InvalidStoredData(
+            "run diff path is outside the artifact directory".to_owned(),
+        ));
+    }
+    read_json(path)
 }
 
 pub fn pending_exists(paths: &ReactorPaths, run_id: &str) -> bool {
     pending_path(paths, run_id).is_file()
 }
 
+pub fn pending_run_ids(paths: &ReactorPaths) -> Result<Vec<String>> {
+    let directory = paths.data_dir.join("manifests").join("pending");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(io_error(directory, source)),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| io_error(&directory, source))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(id).is_ok() {
+            ids.push(id.to_owned());
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
 fn capture(run_id: &str, workspace_id: &str, roots: &[PathBuf]) -> Result<Manifest> {
     let mut captured = Vec::with_capacity(roots.len());
+    let mut remaining_text = MANIFEST_TEXT_LIMIT;
+    let mut file_count = 0_usize;
     for root in roots {
-        let root = dunce::canonicalize(root).map_err(|source| io_error(root, source))?;
+        let canonical = dunce::canonicalize(root).map_err(|source| io_error(root, source))?;
+        if canonical != *root {
+            return Err(ReactorError::InvalidStoredData(format!(
+                "checkpoint root changed: {}",
+                root.display()
+            )));
+        }
+        let root = canonical;
         let display = root
             .to_str()
             .ok_or_else(|| ReactorError::InvalidStoredData("root path is not UTF-8".to_owned()))?
             .to_owned();
         captured.push(ManifestRoot {
             path: display,
-            files: capture_root(&root)?,
+            files: capture_root(&root, &mut remaining_text, &mut file_count)?,
         });
     }
     Ok(Manifest {
@@ -148,7 +211,11 @@ fn capture(run_id: &str, workspace_id: &str, roots: &[PathBuf]) -> Result<Manife
     })
 }
 
-fn capture_root(root: &Path) -> Result<BTreeMap<String, FileEntry>> {
+fn capture_root(
+    root: &Path,
+    remaining_text: &mut u64,
+    file_count: &mut usize,
+) -> Result<BTreeMap<String, FileEntry>> {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -172,13 +239,22 @@ fn capture_root(root: &Path) -> Result<BTreeMap<String, FileEntry>> {
         if !metadata.is_file() && !metadata.file_type().is_symlink() {
             continue;
         }
+        *file_count += 1;
+        if *file_count > MANIFEST_FILE_LIMIT {
+            return Err(ReactorError::InvalidInput(format!(
+                "checkpoint exceeds {MANIFEST_FILE_LIMIT} files"
+            )));
+        }
         let relative = entry
             .path()
             .strip_prefix(root)
             .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
         let key = relative.to_string_lossy().replace('\\', "/");
         if files
-            .insert(key.clone(), file_entry(entry.path(), &metadata)?)
+            .insert(
+                key.clone(),
+                file_entry(entry.path(), &metadata, remaining_text)?,
+            )
             .is_some()
         {
             return Err(ReactorError::InvalidStoredData(format!(
@@ -201,30 +277,55 @@ fn excluded(root: &Path, path: &Path) -> bool {
     })
 }
 
-fn file_entry(path: &Path, metadata: &fs::Metadata) -> Result<FileEntry> {
+fn file_entry(path: &Path, metadata: &fs::Metadata, remaining_text: &mut u64) -> Result<FileEntry> {
     if metadata.file_type().is_symlink() {
         let target = fs::read_link(path).map_err(|source| io_error(path, source))?;
-        let value = target.to_string_lossy();
+        let value = os_bytes(target.as_os_str());
         return Ok(FileEntry {
             kind: "symlink".to_owned(),
             size: value.len() as u64,
-            hash: blake3::hash(value.as_bytes()).to_hex().to_string(),
+            hash: blake3::hash(&value).to_hex().to_string(),
             content: None,
         });
     }
-    if metadata.len() > TEXT_LIMIT {
-        return hash_file(path, "large");
+    let mut file = open_regular(path)?;
+    let opened_metadata = file.metadata().map_err(|source| io_error(path, source))?;
+    if !opened_metadata.is_file() || opened_metadata.file_type().is_symlink() {
+        return Err(ReactorError::InvalidInput(format!(
+            "checkpoint file changed type: {}",
+            path.display()
+        )));
     }
-    let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    if opened_metadata.len() > TEXT_LIMIT {
+        return hash_file(file, path, "large");
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    (&mut file)
+        .take(TEXT_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| io_error(path, source))?;
+    if bytes.len() as u64 > TEXT_LIMIT {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(path, source))?;
+        return hash_file(file, path, "large");
+    }
     let hash = blake3::hash(&bytes).to_hex().to_string();
     let size = bytes.len() as u64;
     match String::from_utf8(bytes) {
-        Ok(content) if !content.contains('\0') => Ok(FileEntry {
-            kind: "text".to_owned(),
-            size,
-            hash,
-            content: Some(content),
-        }),
+        Ok(content) if !content.contains('\0') => {
+            let stored = if size <= *remaining_text {
+                *remaining_text -= size;
+                Some(content)
+            } else {
+                None
+            };
+            Ok(FileEntry {
+                kind: "text".to_owned(),
+                size,
+                hash,
+                content: stored,
+            })
+        }
         _ => Ok(FileEntry {
             kind: "binary".to_owned(),
             size,
@@ -234,8 +335,7 @@ fn file_entry(path: &Path, metadata: &fs::Metadata) -> Result<FileEntry> {
     }
 }
 
-fn hash_file(path: &Path, kind: &str) -> Result<FileEntry> {
-    let mut file = fs::File::open(path).map_err(|source| io_error(path, source))?;
+fn hash_file(mut file: fs::File, path: &Path, kind: &str) -> Result<FileEntry> {
     let mut hasher = blake3::Hasher::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut size = 0_u64;
@@ -255,6 +355,43 @@ fn hash_file(path: &Path, kind: &str) -> Result<FileEntry> {
         hash: hasher.finalize().to_hex().to_string(),
         content: None,
     })
+}
+
+fn open_regular(path: &Path) -> Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path).map_err(|source| io_error(path, source))
+}
+
+#[cfg(unix)]
+fn os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    value
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    value.to_string_lossy().into_owned().into_bytes()
 }
 
 fn compare(before: &Manifest, after: &Manifest, state: &str, completed_at: &str) -> DiffReport {
@@ -310,6 +447,8 @@ fn compare(before: &Manifest, after: &Manifest, state: &str, completed_at: &str)
 fn text_diff(path: &str, old: Option<&FileEntry>, new: Option<&FileEntry>) -> Option<String> {
     if old.is_some_and(|entry| entry.kind != "text")
         || new.is_some_and(|entry| entry.kind != "text")
+        || old.is_some_and(|entry| entry.content.is_none())
+        || new.is_some_and(|entry| entry.content.is_none())
     {
         return None;
     }
@@ -318,6 +457,7 @@ fn text_diff(path: &str, old: Option<&FileEntry>, new: Option<&FileEntry>) -> Op
     if old.is_none() && new.is_none() {
         return None;
     }
+    let path = crate::output::escape_control(path);
     Some(
         TextDiff::from_lines(old.unwrap_or_default(), new.unwrap_or_default())
             .unified_diff()
@@ -335,7 +475,17 @@ fn pending_path(paths: &ReactorPaths, run_id: &str) -> PathBuf {
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    let file = open_regular(path)?;
+    let mut bytes = Vec::new();
+    file.take(ARTIFACT_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| io_error(path, source))?;
+    if bytes.len() as u64 > ARTIFACT_LIMIT {
+        return Err(ReactorError::InvalidStoredData(format!(
+            "artifact exceeds {} MiB",
+            ARTIFACT_LIMIT / 1024 / 1024
+        )));
+    }
     serde_json::from_slice(&bytes)
         .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))
 }
@@ -354,11 +504,17 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     ));
     let mut file = permissions::create_private_new_file(&temporary)
         .map_err(|source| io_error(&temporary, source))?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| io_error(&temporary, source))?;
+    if let Err(source) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(io_error(&temporary, source));
+    }
     drop(file);
-    replace(&temporary, path)
+    if let Err(error) = replace(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]

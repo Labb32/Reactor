@@ -33,8 +33,6 @@ enum RunCommand {
     Cancel(RunMutationArgs),
     /// Queue a new run from a retryable terminal run.
     Retry(RunMutationArgs),
-    /// Recover interrupted runs after their execution leases expire.
-    Recover,
 }
 
 #[derive(Debug, Args)]
@@ -60,7 +58,6 @@ pub(super) fn execute(format: OutputFormat, arguments: &RunArgs) -> Result<()> {
         RunCommand::List => list(format),
         RunCommand::Cancel(arguments) => cancel(format, arguments),
         RunCommand::Retry(arguments) => retry(format, arguments),
-        RunCommand::Recover => recover(format),
     }
 }
 
@@ -98,7 +95,7 @@ fn diff(format: OutputFormat, arguments: &RunIdArgs) -> Result<()> {
     let result = run.result.ok_or_else(|| {
         ReactorError::InvalidArgument(format!("run {} has no final diff", arguments.run_id))
     })?;
-    let report = crate::checkpoint::read_diff(&result)?;
+    let report = crate::checkpoint::read_diff(&paths, &result)?;
     if report.run_id != arguments.run_id {
         return Err(ReactorError::InvalidArgument(format!(
             "run {} diff is no longer retained",
@@ -114,7 +111,9 @@ fn diff(format: OutputFormat, arguments: &RunIdArgs) -> Result<()> {
             for change in report.changes {
                 println!(
                     "{} {}:{}",
-                    change.summary.change, change.summary.root, change.summary.path
+                    change.summary.change,
+                    output::escape_control(&change.summary.root),
+                    output::escape_control(&change.summary.path)
                 );
                 if let Some(diff) = change.unified_diff {
                     print!("{diff}");
@@ -130,21 +129,6 @@ fn diff(format: OutputFormat, arguments: &RunIdArgs) -> Result<()> {
         }
         OutputFormat::Json | OutputFormat::Jsonl => {
             output::write_json(&Envelope::new(app.instance_id, report))
-        }
-    }
-}
-
-fn recover(format: OutputFormat) -> Result<()> {
-    let paths = ReactorPaths::discover()?;
-    let mut app = App::open(&paths)?;
-    let runs = crate::runner::recover(&paths, &mut app)?;
-    match format {
-        OutputFormat::Text => {
-            println!("Recovered runs: {}", runs.len());
-            Ok(())
-        }
-        OutputFormat::Json | OutputFormat::Jsonl => {
-            output::write_json(&Envelope::new(app.instance_id, runs))
         }
     }
 }

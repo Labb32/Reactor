@@ -17,6 +17,7 @@ mod workspaces;
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 7;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_COUNT: i64 = 100_000;
+const RUN_LEASE_DURATION: &str = "+30 seconds";
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
