@@ -1,5 +1,6 @@
 mod agents;
 mod app;
+mod checkpoint;
 mod cli;
 mod config;
 mod domain;

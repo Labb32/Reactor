@@ -61,8 +61,9 @@ src/
 | `plan_approvals` | 승인 주체와 시각 |
 | `schedules` | 시각, 반복 규칙, Gate와 상태 |
 | `schedule_occurrences` | 각 예약 회차와 `QUEUED`·`MISSED` 결과 |
-| `runs` | 실행 상태, 사용량과 Checkpoint |
+| `runs` | 실행 상태와 실행 정책 Snapshot |
 | `attempts` | Agent Process의 시작·종료·Exit 정보 |
+| `run_results` | Workspace의 최신 결과와 Diff 경로 |
 | `leases` | Workspace와 공유 자원 Lock |
 | `audit_events` | Append-only 상태 변경 이력 |
 | `idempotency_keys` | 요청 Hash와 기존 응답 |

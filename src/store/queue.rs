@@ -14,6 +14,7 @@ impl Store {
     pub(crate) fn claim_next_run(
         &mut self,
         config: &ConcurrencyConfig,
+        owner_id: &str,
     ) -> Result<Option<QueueRun>> {
         self.write_transaction(|transaction| {
             super::schedules::refresh_due(transaction)?;
@@ -45,6 +46,11 @@ impl Store {
                 &run.id,
                 serde_json::json!({ "from": "QUEUED", "to": "PREPARING" }),
                 &now,
+            )?;
+            transaction.execute(
+                "INSERT INTO leases (resource_type, resource_id, owner_id, acquired_at, expires_at)
+                 VALUES ('run', ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+5 seconds'))",
+                params![run.id, owner_id, now],
             )?;
             run.state = "PREPARING".to_owned();
             run.eligible = false;

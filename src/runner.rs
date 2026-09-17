@@ -2,6 +2,7 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, ExitStatus, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -9,12 +10,13 @@ use std::{
 use crate::{
     agents::{AgentCommand, AgentKind},
     app::App,
+    checkpoint,
     domain::{PlanStatus, RunState},
     error::{ReactorError, Result, io_error},
     paths::ReactorPaths,
     plan::{PlanVersionRecord, validate_requirements, validate_tools},
     process_supervisor::ProcessSupervisor,
-    run::{BeginAttempt, RunRecord},
+    run::{BeginAttempt, ExecutionRun, RunRecord},
     run_log::{self, RunLog},
     workspace::{WorkspacePolicy, canonicalize, fingerprint},
 };
@@ -25,14 +27,49 @@ const STOP_GRACE_PERIOD: Duration = Duration::from_secs(3);
 pub fn execute_next(paths: &ReactorPaths, app: &mut App) -> Result<Option<RunRecord>> {
     let runs_dir = paths.data_dir.join("runs");
     run_log::prune(&runs_dir).map_err(|source| io_error(&runs_dir, source))?;
-    let Some(claimed) = app.store.claim_next_run(&app.config.concurrency)? else {
+    let owner_id = crate::ids::new_id();
+    let Some(claimed) = app
+        .store
+        .claim_next_run(&app.config.concurrency, &owner_id)?
+    else {
         return Ok(None);
     };
-    execute_claimed(paths, app, &claimed.id).map(Some)
+    let (stop_heartbeat, heartbeat) = heartbeat(paths, &claimed.id, &owner_id);
+    let result = execute_claimed(paths, app, &claimed.id);
+    let _ = stop_heartbeat.send(());
+    let _ = heartbeat.join();
+    result.map(Some)
 }
 
 fn execute_claimed(paths: &ReactorPaths, app: &mut App, run_id: &str) -> Result<RunRecord> {
     let execution = app.store.execution_run(run_id)?;
+    let workspace = app.store.get_workspace(&execution.record.workspace_id)?;
+    let roots = execution
+        .policy
+        .write_paths(Path::new(&workspace.canonical_path));
+    if checkpoint::begin(paths, run_id, &execution.record.workspace_id, &roots).is_err() {
+        return app.store.finish_run(
+            run_id,
+            None,
+            RunState::Preparing,
+            RunState::ReviewRequired,
+            None,
+            "checkpoint_unavailable",
+        );
+    }
+    let run = execute_prepared(paths, app, execution, workspace)?;
+    let mut result = checkpoint::finish(paths, &run.id, &run.state)?;
+    add_attempt_result(&mut result, &run);
+    app.store.record_run_result(&run.id, &result)
+}
+
+fn execute_prepared(
+    paths: &ReactorPaths,
+    app: &mut App,
+    execution: ExecutionRun,
+    workspace: crate::workspace::WorkspaceRecord,
+) -> Result<RunRecord> {
+    let run_id = &execution.record.id;
     if execution.record.cancel_requested_at.is_some() {
         return app.store.finish_run(
             run_id,
@@ -47,7 +84,6 @@ fn execute_claimed(paths: &ReactorPaths, app: &mut App, run_id: &str) -> Result<
         &execution.record.plan_id,
         Some(execution.record.plan_version),
     )?;
-    let workspace = app.store.get_workspace(&execution.record.workspace_id)?;
     let prepared = match prepare(
         &execution.record,
         &execution.policy,
@@ -247,6 +283,58 @@ fn execute_claimed(paths: &ReactorPaths, app: &mut App, run_id: &str) -> Result<
         outcome.status.code(),
         reason,
     )
+}
+
+pub fn recover(paths: &ReactorPaths, app: &mut App) -> Result<Vec<RunRecord>> {
+    let mut recovered = app.store.recover_interrupted_runs()?;
+    for run in app.store.runs_without_results()? {
+        if !checkpoint::pending_exists(paths, &run.id) {
+            continue;
+        }
+        let mut result = checkpoint::finish(paths, &run.id, &run.state)?;
+        add_attempt_result(&mut result, &run);
+        let completed = app.store.record_run_result(&run.id, &result)?;
+        if let Some(existing) = recovered.iter_mut().find(|existing| existing.id == run.id) {
+            *existing = completed;
+        } else {
+            recovered.push(completed);
+        }
+    }
+    Ok(recovered)
+}
+
+fn add_attempt_result(result: &mut crate::run::RunResult, run: &RunRecord) {
+    if let Some(attempt) = &run.attempt {
+        result.exit_code = attempt.exit_code;
+        result.termination_reason = attempt.termination_reason.clone();
+        result.log_path = Some(attempt.log_path.clone());
+    }
+}
+
+fn heartbeat(
+    paths: &ReactorPaths,
+    run_id: &str,
+    owner_id: &str,
+) -> (mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let database = paths.database_file();
+    let run_id = run_id.to_owned();
+    let owner_id = owner_id.to_owned();
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let Ok(store) = crate::store::Store::open_initialized(&database) else {
+            return;
+        };
+        loop {
+            match receiver.recv_timeout(Duration::from_secs(1)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if !matches!(store.heartbeat_run(&run_id, &owner_id), Ok(true)) {
+                break;
+            }
+        }
+    });
+    (sender, handle)
 }
 
 struct PreparedRun {

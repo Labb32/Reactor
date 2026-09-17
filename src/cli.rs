@@ -96,6 +96,9 @@ const CAPABILITIES: &[&str] = &[
     "fair_queue",
     "run_execution",
     "run_cancellation",
+    "run_results",
+    "workspace_diff",
+    "interrupted_run_recovery",
 ];
 
 fn execute(cli: &Cli) -> Result<()> {

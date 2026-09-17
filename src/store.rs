@@ -14,7 +14,7 @@ mod runs;
 mod schedules;
 mod workspaces;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 6;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 7;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_COUNT: i64 = 100_000;
 
@@ -95,6 +95,7 @@ impl Store {
                 insert_instance_id(&transaction)?;
                 transaction.execute_batch(MIGRATION_5)?;
                 transaction.execute_batch(MIGRATION_6)?;
+                transaction.execute_batch(MIGRATION_7)?;
             }
             1 => {
                 transaction.execute_batch(MIGRATION_2)?;
@@ -103,24 +104,32 @@ impl Store {
                 transaction.execute_batch(MIGRATION_4)?;
                 transaction.execute_batch(MIGRATION_5)?;
                 transaction.execute_batch(MIGRATION_6)?;
+                transaction.execute_batch(MIGRATION_7)?;
             }
             2 => {
                 transaction.execute_batch(MIGRATION_3)?;
                 transaction.execute_batch(MIGRATION_4)?;
                 transaction.execute_batch(MIGRATION_5)?;
                 transaction.execute_batch(MIGRATION_6)?;
+                transaction.execute_batch(MIGRATION_7)?;
             }
             3 => {
                 transaction.execute_batch(MIGRATION_4)?;
                 transaction.execute_batch(MIGRATION_5)?;
                 transaction.execute_batch(MIGRATION_6)?;
+                transaction.execute_batch(MIGRATION_7)?;
             }
             4 => {
                 transaction.execute_batch(MIGRATION_5)?;
                 transaction.execute_batch(MIGRATION_6)?;
+                transaction.execute_batch(MIGRATION_7)?;
             }
             5 => {
                 transaction.execute_batch(MIGRATION_6)?;
+                transaction.execute_batch(MIGRATION_7)?;
+            }
+            6 => {
+                transaction.execute_batch(MIGRATION_7)?;
             }
             _ => unreachable!("schema version was checked before migration"),
         }
@@ -413,3 +422,4 @@ const MIGRATION_3: &str = include_str!("../migrations/0003_workspace_policy.sql"
 const MIGRATION_4: &str = include_str!("../migrations/0004_project_sandbox.sql");
 const MIGRATION_5: &str = include_str!("../migrations/0005_plan_requirements.sql");
 const MIGRATION_6: &str = include_str!("../migrations/0006_execution.sql");
+const MIGRATION_7: &str = include_str!("../migrations/0007_results.sql");

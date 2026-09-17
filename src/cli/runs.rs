@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use crate::{
     app::App,
-    error::Result,
+    error::{ReactorError, Result},
     output,
     output::{Envelope, OutputFormat},
     paths::ReactorPaths,
@@ -21,12 +21,20 @@ enum RunCommand {
     Next,
     /// Show a run and its latest attempt.
     Show(RunIdArgs),
+    /// Show the current state and latest attempt of a run.
+    Progress(RunIdArgs),
+    /// Show the final result summary of a run.
+    Result(RunIdArgs),
+    /// Show the retained workspace diff for a run.
+    Diff(RunIdArgs),
     /// List runs.
     List,
     /// Cancel a queued or active run.
     Cancel(RunMutationArgs),
     /// Queue a new run from a retryable terminal run.
     Retry(RunMutationArgs),
+    /// Recover interrupted runs after their execution leases expire.
+    Recover,
 }
 
 #[derive(Debug, Args)]
@@ -46,9 +54,98 @@ pub(super) fn execute(format: OutputFormat, arguments: &RunArgs) -> Result<()> {
     match &arguments.command {
         RunCommand::Next => next(format),
         RunCommand::Show(arguments) => show(format, arguments),
+        RunCommand::Progress(arguments) => show(format, arguments),
+        RunCommand::Result(arguments) => result(format, arguments),
+        RunCommand::Diff(arguments) => diff(format, arguments),
         RunCommand::List => list(format),
         RunCommand::Cancel(arguments) => cancel(format, arguments),
         RunCommand::Retry(arguments) => retry(format, arguments),
+        RunCommand::Recover => recover(format),
+    }
+}
+
+fn result(format: OutputFormat, arguments: &RunIdArgs) -> Result<()> {
+    let paths = ReactorPaths::discover()?;
+    let app = App::open(&paths)?;
+    let run = app.store.get_run(&arguments.run_id)?;
+    let result = run.result.ok_or_else(|| {
+        ReactorError::InvalidArgument(format!("run {} has no final result", arguments.run_id))
+    })?;
+    match format {
+        OutputFormat::Text => {
+            println!("state: {}", result.state);
+            println!("completed: {}", result.completed_at);
+            if let Some(reason) = &result.termination_reason {
+                println!("reason: {reason}");
+            }
+            println!("changed files: {}", result.changed_files.len());
+            if let Some(log) = &result.log_path {
+                println!("log: {log}");
+            }
+            println!("diff: {}", result.diff_path);
+            Ok(())
+        }
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            output::write_json(&Envelope::new(app.instance_id, result))
+        }
+    }
+}
+
+fn diff(format: OutputFormat, arguments: &RunIdArgs) -> Result<()> {
+    let paths = ReactorPaths::discover()?;
+    let app = App::open(&paths)?;
+    let run = app.store.get_run(&arguments.run_id)?;
+    let result = run.result.ok_or_else(|| {
+        ReactorError::InvalidArgument(format!("run {} has no final diff", arguments.run_id))
+    })?;
+    let report = crate::checkpoint::read_diff(&result)?;
+    if report.run_id != arguments.run_id {
+        return Err(ReactorError::InvalidArgument(format!(
+            "run {} diff is no longer retained",
+            arguments.run_id
+        )));
+    }
+    match format {
+        OutputFormat::Text => {
+            if report.changes.is_empty() {
+                println!("No file changes.");
+                return Ok(());
+            }
+            for change in report.changes {
+                println!(
+                    "{} {}:{}",
+                    change.summary.change, change.summary.root, change.summary.path
+                );
+                if let Some(diff) = change.unified_diff {
+                    print!("{diff}");
+                } else {
+                    println!(
+                        "  {} -> {} bytes",
+                        change.summary.before_size.unwrap_or_default(),
+                        change.summary.after_size.unwrap_or_default()
+                    );
+                }
+            }
+            Ok(())
+        }
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            output::write_json(&Envelope::new(app.instance_id, report))
+        }
+    }
+}
+
+fn recover(format: OutputFormat) -> Result<()> {
+    let paths = ReactorPaths::discover()?;
+    let mut app = App::open(&paths)?;
+    let runs = crate::runner::recover(&paths, &mut app)?;
+    match format {
+        OutputFormat::Text => {
+            println!("Recovered runs: {}", runs.len());
+            Ok(())
+        }
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            output::write_json(&Envelope::new(app.instance_id, runs))
+        }
     }
 }
 
