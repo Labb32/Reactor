@@ -87,6 +87,7 @@ reactor events --after <cursor> --output jsonl
 
 ## 문서
 
+- [CLI 사용법](docs/CLI.md)
 - [프로젝트 기획](docs/REACTOR.md)
 - [시스템 설계](docs/SYSTEM_DESIGN.md)
 - [CLI 계약](docs/CLI_CONTRACT.md)
