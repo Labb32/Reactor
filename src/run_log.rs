@@ -1,0 +1,171 @@
+use std::{
+    ffi::OsString,
+    fs::{self, File},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
+};
+
+use crate::permissions;
+
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_LOG_FILES: usize = 5;
+const TAIL_BYTES: usize = 64 * 1024;
+const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+pub struct RunLog {
+    path: PathBuf,
+    file: Option<File>,
+    size: u64,
+    tail: Vec<u8>,
+}
+
+pub type SharedRunLog = Arc<Mutex<RunLog>>;
+
+impl RunLog {
+    pub fn open(path: &Path) -> io::Result<SharedRunLog> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("log path has no parent"))?;
+        permissions::create_private_dir(parent)?;
+        let file = permissions::create_private_new_file(path)?;
+        Ok(Arc::new(Mutex::new(Self {
+            path: path.to_owned(),
+            file: Some(file),
+            size: 0,
+            tail: Vec::new(),
+        })))
+    }
+
+    pub fn tail(log: &SharedRunLog) -> io::Result<String> {
+        let log = log
+            .lock()
+            .map_err(|_| io::Error::other("log writer lock was poisoned"))?;
+        Ok(String::from_utf8_lossy(&log.tail).into_owned())
+    }
+
+    pub fn flush(log: &SharedRunLog) -> io::Result<()> {
+        let mut log = log
+            .lock()
+            .map_err(|_| io::Error::other("log writer lock was poisoned"))?;
+        log.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("log file is unavailable"))?
+            .flush()
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.size > 0 && self.size + bytes.len() as u64 > MAX_LOG_BYTES {
+            self.rotate()?;
+        }
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("log file is unavailable"))?
+            .write_all(bytes)?;
+        self.size += bytes.len() as u64;
+        self.tail.extend_from_slice(bytes);
+        if self.tail.len() > TAIL_BYTES {
+            self.tail.drain(..self.tail.len() - TAIL_BYTES);
+        }
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        if let Some(mut file) = self.file.take() {
+            file.flush()?;
+        }
+
+        let oldest = rotated_path(&self.path, MAX_LOG_FILES - 1);
+        remove_file_if_present(&oldest)?;
+        for index in (1..MAX_LOG_FILES - 1).rev() {
+            let source = rotated_path(&self.path, index);
+            if source.exists() {
+                fs::rename(&source, rotated_path(&self.path, index + 1))?;
+            }
+        }
+        if self.path.exists() {
+            fs::rename(&self.path, rotated_path(&self.path, 1))?;
+        }
+        self.file = Some(permissions::create_private_new_file(&self.path)?);
+        self.size = 0;
+        Ok(())
+    }
+}
+
+pub fn capture(mut reader: impl Read, log: SharedRunLog) -> io::Result<()> {
+    let mut buffer = [0_u8; 8 * 1024];
+    let mut write_error = None;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return match write_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
+        }
+        if write_error.is_none()
+            && let Err(error) = log
+                .lock()
+                .map_err(|_| io::Error::other("log writer lock was poisoned"))
+                .and_then(|mut log| log.write(&buffer[..count]))
+        {
+            write_error = Some(error);
+        }
+    }
+}
+
+pub fn prune(root: &Path) -> io::Result<()> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let now = SystemTime::now();
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let directory = entry.path();
+        let files = match fs::read_dir(&directory) {
+            Ok(files) => files,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for file in files {
+            let file = file?;
+            let file_type = file.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let metadata = match file.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if now
+                .duration_since(metadata.modified()?)
+                .is_ok_and(|age| age > RETENTION)
+            {
+                remove_file_if_present(&file.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rotated_path(path: &Path, index: usize) -> PathBuf {
+    let mut value = OsString::from(path.as_os_str());
+    value.push(format!(".{index}"));
+    PathBuf::from(value)
+}
+
+fn remove_file_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}

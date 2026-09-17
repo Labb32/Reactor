@@ -1,6 +1,6 @@
 use std::{
     io,
-    process::{Child, ChildStderr, ChildStdin, Command, ExitStatus},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus},
     thread,
     time::{Duration, Instant},
 };
@@ -36,6 +36,14 @@ impl ProcessSupervisor {
 
     pub fn take_stderr(&mut self) -> Option<ChildStderr> {
         self.child.stderr.take()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    pub fn id(&self) -> u32 {
+        self.child.id()
     }
 
     pub fn wait_for(&mut self, timeout: Duration) -> io::Result<Option<ExitStatus>> {

@@ -5,6 +5,7 @@ use serde::Serialize;
 
 mod plans;
 mod queue;
+mod runs;
 mod schedules;
 mod workspaces;
 
@@ -46,6 +47,8 @@ enum Command {
     Schedule(schedules::ScheduleArgs),
     /// Inspect queued runs.
     Queue(queue::QueueArgs),
+    /// Execute, inspect, and cancel runs.
+    Run(runs::RunArgs),
 }
 
 #[derive(Debug, Args)]
@@ -91,6 +94,8 @@ const CAPABILITIES: &[&str] = &[
     "plan_versions",
     "single_schedules",
     "fair_queue",
+    "run_execution",
+    "run_cancellation",
 ];
 
 fn execute(cli: &Cli) -> Result<()> {
@@ -103,6 +108,7 @@ fn execute(cli: &Cli) -> Result<()> {
         Command::Plan(arguments) => plans::execute(cli.output, arguments),
         Command::Schedule(arguments) => schedules::execute(cli.output, arguments),
         Command::Queue(arguments) => queue::execute(cli.output, arguments),
+        Command::Run(arguments) => runs::execute(cli.output, arguments),
     }
 }
 

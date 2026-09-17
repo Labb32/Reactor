@@ -1,0 +1,454 @@
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
+
+use super::{Store, write_event};
+use crate::{
+    domain::RunState,
+    error::{ReactorError, Result},
+    plan::PlanLimits,
+    run::{AttemptRecord, BeginAttempt, ExecutionRun, RunRecord},
+    workspace::WorkspacePolicy,
+};
+
+impl Store {
+    pub fn get_run(&self, run_id: &str) -> Result<RunRecord> {
+        self.ensure_supported_schema()?;
+        query_run(&self.connection, run_id)
+    }
+
+    pub fn list_runs(&self) -> Result<Vec<RunRecord>> {
+        self.ensure_supported_schema()?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT id FROM runs ORDER BY julianday(created_at), rowid")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| query_run(&self.connection, &id))
+            .collect()
+    }
+
+    pub(crate) fn execution_run(&self, run_id: &str) -> Result<ExecutionRun> {
+        self.ensure_supported_schema()?;
+        let policy_json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT policy_snapshot_json FROM runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(policy_json) = policy_json else {
+            return Err(ReactorError::RunNotFound(run_id.to_owned()));
+        };
+        let policy = serde_json::from_str::<WorkspacePolicy>(&policy_json)
+            .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
+        Ok(ExecutionRun {
+            record: query_run(&self.connection, run_id)?,
+            policy,
+        })
+    }
+
+    pub fn cancel_run(&mut self, run_id: &str, idempotency_key: Option<&str>) -> Result<RunRecord> {
+        let request = serde_json::to_vec(&serde_json::json!({
+            "operation": "run_cancel",
+            "run_id": run_id
+        }))
+        .map_err(|error| ReactorError::InvalidInput(error.to_string()))?;
+        let operation = |transaction: &Transaction<'_>| cancel(transaction, run_id);
+        match idempotency_key {
+            Some(key) => self.idempotent_write(key, &request, operation),
+            None => self.write_transaction(operation),
+        }
+    }
+
+    pub fn retry_run(&mut self, run_id: &str, idempotency_key: Option<&str>) -> Result<RunRecord> {
+        let new_run_id = crate::ids::new_id();
+        let request = serde_json::to_vec(&serde_json::json!({
+            "operation": "run_retry",
+            "run_id": run_id
+        }))
+        .map_err(|error| ReactorError::InvalidInput(error.to_string()))?;
+        let operation = |transaction: &Transaction<'_>| retry(transaction, run_id, &new_run_id);
+        match idempotency_key {
+            Some(key) => self.idempotent_write(key, &request, operation),
+            None => self.write_transaction(operation),
+        }
+    }
+
+    pub(crate) fn begin_attempt(
+        &mut self,
+        run_id: &str,
+        attempt_id: &str,
+        log_path: &str,
+    ) -> Result<BeginAttempt> {
+        self.write_transaction(|transaction| {
+            let run = query_run(transaction, run_id)?;
+            if run.state != RunState::Preparing.as_str() {
+                return Err(invalid_transition(&run.state, RunState::Preparing));
+            }
+            if run.cancel_requested_at.is_some() {
+                return Ok(BeginAttempt::CancelRequested);
+            }
+            let attempts: u32 = transaction.query_row(
+                "SELECT COUNT(*) FROM attempts WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )?;
+            if attempts >= run.limits.max_attempts {
+                return Ok(BeginAttempt::LimitReached);
+            }
+            let attempt = AttemptRecord {
+                id: attempt_id.to_owned(),
+                attempt_number: attempts + 1,
+                process_id: None,
+                process_started_at: None,
+                started_at: crate::time::now_utc(),
+                ended_at: None,
+                exit_code: None,
+                termination_reason: None,
+                log_path: log_path.to_owned(),
+            };
+            transaction.execute(
+                "INSERT INTO attempts
+                 (id, run_id, attempt_number, started_at, log_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    attempt.id,
+                    run_id,
+                    attempt.attempt_number,
+                    attempt.started_at,
+                    attempt.log_path
+                ],
+            )?;
+            write_event(
+                transaction,
+                "RUN_ATTEMPT_CREATED",
+                "run",
+                run_id,
+                serde_json::json!({
+                    "attempt_id": attempt.id,
+                    "attempt_number": attempt.attempt_number
+                }),
+                &attempt.started_at,
+            )?;
+            Ok(BeginAttempt::Started(attempt))
+        })
+    }
+
+    pub(crate) fn mark_run_running(
+        &mut self,
+        run_id: &str,
+        attempt_id: &str,
+        process_id: u32,
+    ) -> Result<bool> {
+        self.write_transaction(|transaction| {
+            let now = crate::time::now_utc();
+            let changed = transaction.execute(
+                "UPDATE runs SET state = 'RUNNING', updated_at = ?1
+                 WHERE id = ?2 AND state = 'PREPARING' AND cancel_requested_at IS NULL",
+                params![now, run_id],
+            )?;
+            if changed == 0 {
+                return Ok(false);
+            }
+            let attempt_changed = transaction.execute(
+                "UPDATE attempts SET process_id = ?1, process_started_at = ?2
+                 WHERE id = ?3 AND run_id = ?4 AND ended_at IS NULL",
+                params![process_id, now, attempt_id, run_id],
+            )?;
+            if attempt_changed != 1 {
+                return Err(ReactorError::InvalidStoredData(
+                    "active attempt is missing".to_owned(),
+                ));
+            }
+            write_event(
+                transaction,
+                "RUN_STATE_CHANGED",
+                "run",
+                run_id,
+                serde_json::json!({ "from": "PREPARING", "to": "RUNNING" }),
+                &now,
+            )?;
+            Ok(true)
+        })
+    }
+
+    pub(crate) fn cancellation_requested(&self, run_id: &str) -> Result<bool> {
+        self.ensure_supported_schema()?;
+        self.connection
+            .query_row(
+                "SELECT cancel_requested_at IS NOT NULL FROM runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| ReactorError::RunNotFound(run_id.to_owned()))
+    }
+
+    pub(crate) fn finish_run(
+        &mut self,
+        run_id: &str,
+        attempt_id: Option<&str>,
+        expected: RunState,
+        next: RunState,
+        exit_code: Option<i32>,
+        reason: &str,
+    ) -> Result<RunRecord> {
+        if !next.is_terminal() || !expected.can_transition_to(next) {
+            return Err(ReactorError::InvalidRunTransition {
+                from: expected.to_string(),
+                to: next.to_string(),
+            });
+        }
+        self.write_transaction(|transaction| {
+            let current = query_run(transaction, run_id)?;
+            if current.state != expected.as_str() {
+                return Err(invalid_transition(&current.state, next));
+            }
+            let (next, reason) = if current.cancel_requested_at.is_some()
+                && matches!(expected, RunState::Preparing | RunState::Running)
+            {
+                (RunState::Cancelled, "cancel_requested")
+            } else {
+                (next, reason)
+            };
+            let now = crate::time::now_utc();
+            let changed = transaction.execute(
+                "UPDATE runs SET state = ?1, updated_at = ?2 WHERE id = ?3 AND state = ?4",
+                params![next.as_str(), now, run_id, expected.as_str()],
+            )?;
+            if changed != 1 {
+                let current = query_run(transaction, run_id)?;
+                return Err(invalid_transition(&current.state, next));
+            }
+            if let Some(attempt_id) = attempt_id {
+                let attempt_changed = transaction.execute(
+                    "UPDATE attempts
+                     SET ended_at = ?1, exit_code = ?2, termination_reason = ?3
+                     WHERE id = ?4 AND run_id = ?5 AND ended_at IS NULL",
+                    params![now, exit_code, reason, attempt_id, run_id],
+                )?;
+                if attempt_changed != 1 {
+                    return Err(ReactorError::InvalidStoredData(
+                        "active attempt is missing".to_owned(),
+                    ));
+                }
+            }
+            write_event(
+                transaction,
+                "RUN_STATE_CHANGED",
+                "run",
+                run_id,
+                serde_json::json!({
+                    "from": expected.as_str(),
+                    "to": next.as_str(),
+                    "reason": reason
+                }),
+                &now,
+            )?;
+            query_run(transaction, run_id)
+        })
+    }
+}
+
+fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
+    let run = query_run(transaction, run_id)?;
+    let state = parse_state(&run.state)?;
+    let now = crate::time::now_utc();
+    match state {
+        RunState::Waiting | RunState::Queued => {
+            let changed = transaction.execute(
+                "UPDATE runs SET state = 'CANCELLED', cancel_requested_at = ?1, updated_at = ?1
+                 WHERE id = ?2 AND state = ?3",
+                params![now, run_id, state.as_str()],
+            )?;
+            if changed != 1 {
+                return Err(invalid_transition(&run.state, RunState::Cancelled));
+            }
+            if let Some(occurrence_id) = &run.occurrence_id {
+                transaction.execute(
+                    "UPDATE schedule_occurrences SET state = 'CANCELLED'
+                     WHERE id = ?1 AND state IN ('WAITING', 'QUEUED')",
+                    [occurrence_id],
+                )?;
+            }
+            write_event(
+                transaction,
+                "RUN_STATE_CHANGED",
+                "run",
+                run_id,
+                serde_json::json!({
+                    "from": state.as_str(),
+                    "to": "CANCELLED",
+                    "reason": "cancel_requested"
+                }),
+                &now,
+            )?;
+        }
+        RunState::Preparing | RunState::Running => {
+            if run.cancel_requested_at.is_none() {
+                transaction.execute(
+                    "UPDATE runs SET cancel_requested_at = ?1, updated_at = ?1
+                     WHERE id = ?2 AND state = ?3 AND cancel_requested_at IS NULL",
+                    params![now, run_id, state.as_str()],
+                )?;
+                write_event(
+                    transaction,
+                    "RUN_CANCEL_REQUESTED",
+                    "run",
+                    run_id,
+                    serde_json::json!({ "state": state.as_str() }),
+                    &now,
+                )?;
+            }
+        }
+        RunState::Cancelled => return Ok(run),
+        _ => return Err(invalid_transition(&run.state, RunState::Cancelled)),
+    }
+    query_run(transaction, run_id)
+}
+
+fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Result<RunRecord> {
+    let source = query_run(transaction, run_id)?;
+    let state = parse_state(&source.state)?;
+    if !matches!(
+        state,
+        RunState::Failed | RunState::Cancelled | RunState::LimitReached | RunState::ReviewRequired
+    ) {
+        return Err(ReactorError::InvalidArgument(format!(
+            "run state {} cannot be retried",
+            state.as_str()
+        )));
+    }
+    let now = crate::time::now_utc();
+    let changed = transaction.execute(
+        "INSERT INTO runs
+         (id, workspace_id, plan_id, plan_version, occurrence_id, state, agent_kind,
+          provider, local_endpoint, policy_snapshot_json, limits_snapshot_json,
+          ready_at, created_at, updated_at)
+         SELECT ?1, workspace_id, plan_id, plan_version, NULL, 'QUEUED', agent_kind,
+                provider, local_endpoint, policy_snapshot_json, limits_snapshot_json,
+                ?2, ?2, ?2
+         FROM runs WHERE id = ?3 AND state = ?4",
+        params![new_run_id, now, run_id, state.as_str()],
+    )?;
+    if changed != 1 {
+        return Err(ReactorError::InvalidStoredData(
+            "retry source changed unexpectedly".to_owned(),
+        ));
+    }
+    write_event(
+        transaction,
+        "RUN_QUEUED",
+        "run",
+        new_run_id,
+        serde_json::json!({ "retry_of": run_id, "workspace_id": source.workspace_id }),
+        &now,
+    )?;
+    query_run(transaction, new_run_id)
+}
+
+fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
+    struct StoredRun {
+        workspace_id: String,
+        plan_id: String,
+        plan_version: u32,
+        occurrence_id: Option<String>,
+        state: String,
+        agent_kind: String,
+        provider: Option<String>,
+        local_endpoint: Option<String>,
+        limits_json: String,
+        ready_at: String,
+        cancel_requested_at: Option<String>,
+        created_at: String,
+        updated_at: String,
+    }
+    let stored: Option<StoredRun> = connection
+        .query_row(
+            "SELECT workspace_id, plan_id, plan_version, occurrence_id, state, agent_kind,
+                    provider, local_endpoint, limits_snapshot_json, ready_at,
+                    cancel_requested_at, created_at, updated_at
+             FROM runs WHERE id = ?1",
+            [run_id],
+            |row| {
+                Ok(StoredRun {
+                    workspace_id: row.get(0)?,
+                    plan_id: row.get(1)?,
+                    plan_version: row.get(2)?,
+                    occurrence_id: row.get(3)?,
+                    state: row.get(4)?,
+                    agent_kind: row.get(5)?,
+                    provider: row.get(6)?,
+                    local_endpoint: row.get(7)?,
+                    limits_json: row.get(8)?,
+                    ready_at: row.get(9)?,
+                    cancel_requested_at: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Err(ReactorError::RunNotFound(run_id.to_owned()));
+    };
+    let limits = serde_json::from_str::<PlanLimits>(&stored.limits_json)
+        .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
+    Ok(RunRecord {
+        id: run_id.to_owned(),
+        workspace_id: stored.workspace_id,
+        plan_id: stored.plan_id,
+        plan_version: stored.plan_version,
+        occurrence_id: stored.occurrence_id,
+        state: stored.state,
+        agent_kind: stored.agent_kind,
+        provider: stored.provider,
+        local_endpoint: stored.local_endpoint,
+        limits,
+        ready_at: stored.ready_at,
+        cancel_requested_at: stored.cancel_requested_at,
+        attempt: query_attempt(connection, run_id)?,
+        created_at: stored.created_at,
+        updated_at: stored.updated_at,
+    })
+}
+
+fn query_attempt(connection: &Connection, run_id: &str) -> Result<Option<AttemptRecord>> {
+    Ok(connection
+        .query_row(
+            "SELECT id, attempt_number, process_id, process_started_at, started_at,
+                    ended_at, exit_code, termination_reason, log_path
+             FROM attempts WHERE run_id = ?1 ORDER BY attempt_number DESC LIMIT 1",
+            [run_id],
+            map_attempt,
+        )
+        .optional()?)
+}
+
+fn map_attempt(row: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
+    Ok(AttemptRecord {
+        id: row.get(0)?,
+        attempt_number: row.get(1)?,
+        process_id: row.get(2)?,
+        process_started_at: row.get(3)?,
+        started_at: row.get(4)?,
+        ended_at: row.get(5)?,
+        exit_code: row.get(6)?,
+        termination_reason: row.get(7)?,
+        log_path: row.get(8)?,
+    })
+}
+
+fn parse_state(value: &str) -> Result<RunState> {
+    RunState::parse(value)
+        .ok_or_else(|| ReactorError::InvalidStoredData(format!("unknown run state: {value}")))
+}
+
+fn invalid_transition(from: &str, to: RunState) -> ReactorError {
+    ReactorError::InvalidRunTransition {
+        from: from.to_owned(),
+        to: to.to_string(),
+    }
+}

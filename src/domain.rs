@@ -36,6 +36,22 @@ pub enum RunState {
 }
 
 impl RunState {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "WAITING" => Some(Self::Waiting),
+            "QUEUED" => Some(Self::Queued),
+            "PREPARING" => Some(Self::Preparing),
+            "RUNNING" => Some(Self::Running),
+            "SUCCEEDED" => Some(Self::Succeeded),
+            "FAILED" => Some(Self::Failed),
+            "CANCELLED" => Some(Self::Cancelled),
+            "LIMIT_REACHED" => Some(Self::LimitReached),
+            "REVIEW_REQUIRED" => Some(Self::ReviewRequired),
+            "MISSED" => Some(Self::Missed),
+            _ => None,
+        }
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Waiting => "WAITING",
@@ -61,7 +77,11 @@ impl RunState {
                 )
                 | (
                     Self::Preparing,
-                    Self::Running | Self::Failed | Self::Cancelled
+                    Self::Running
+                        | Self::Failed
+                        | Self::Cancelled
+                        | Self::LimitReached
+                        | Self::ReviewRequired
                 )
                 | (
                     Self::Running,
@@ -74,7 +94,6 @@ impl RunState {
         )
     }
 
-    #[allow(dead_code)]
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,

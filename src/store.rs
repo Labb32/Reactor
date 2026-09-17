@@ -6,17 +6,15 @@ use rusqlite::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::{
-    domain::RunState,
-    error::{ReactorError, Result},
-};
+use crate::error::{ReactorError, Result};
 
 mod plans;
 mod queue;
+mod runs;
 mod schedules;
 mod workspaces;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 5;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 6;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_COUNT: i64 = 100_000;
 
@@ -96,6 +94,7 @@ impl Store {
                 transaction.execute_batch(MIGRATION_1)?;
                 insert_instance_id(&transaction)?;
                 transaction.execute_batch(MIGRATION_5)?;
+                transaction.execute_batch(MIGRATION_6)?;
             }
             1 => {
                 transaction.execute_batch(MIGRATION_2)?;
@@ -103,18 +102,25 @@ impl Store {
                 transaction.execute_batch(MIGRATION_3)?;
                 transaction.execute_batch(MIGRATION_4)?;
                 transaction.execute_batch(MIGRATION_5)?;
+                transaction.execute_batch(MIGRATION_6)?;
             }
             2 => {
                 transaction.execute_batch(MIGRATION_3)?;
                 transaction.execute_batch(MIGRATION_4)?;
                 transaction.execute_batch(MIGRATION_5)?;
+                transaction.execute_batch(MIGRATION_6)?;
             }
             3 => {
                 transaction.execute_batch(MIGRATION_4)?;
                 transaction.execute_batch(MIGRATION_5)?;
+                transaction.execute_batch(MIGRATION_6)?;
             }
             4 => {
                 transaction.execute_batch(MIGRATION_5)?;
+                transaction.execute_batch(MIGRATION_6)?;
+            }
+            5 => {
+                transaction.execute_batch(MIGRATION_6)?;
             }
             _ => unreachable!("schema version was checked before migration"),
         }
@@ -301,45 +307,6 @@ impl Store {
         transaction.commit()?;
         Ok(result)
     }
-
-    #[allow(dead_code)]
-    pub fn transition_run_state(
-        &mut self,
-        run_id: &str,
-        expected: RunState,
-        next: RunState,
-        occurred_at: &str,
-    ) -> Result<bool> {
-        if !expected.can_transition_to(next) {
-            return Err(ReactorError::InvalidRunTransition {
-                from: expected.to_string(),
-                to: next.to_string(),
-            });
-        }
-
-        self.write_transaction(|transaction| {
-            let changed = transaction.execute(
-                "UPDATE runs SET state = ?1, updated_at = ?2 WHERE id = ?3 AND state = ?4",
-                params![next.as_str(), occurred_at, run_id, expected.as_str()],
-            )?;
-
-            if changed == 1 {
-                write_event(
-                    transaction,
-                    "RUN_STATE_CHANGED",
-                    "run",
-                    run_id,
-                    serde_json::json!({
-                        "from": expected.as_str(),
-                        "to": next.as_str()
-                    }),
-                    occurred_at,
-                )?;
-            }
-
-            Ok(changed == 1)
-        })
-    }
 }
 
 fn insert_instance_id(transaction: &Transaction<'_>) -> Result<()> {
@@ -445,3 +412,4 @@ const MIGRATION_2: &str = include_str!("../migrations/0002_instance_id.sql");
 const MIGRATION_3: &str = include_str!("../migrations/0003_workspace_policy.sql");
 const MIGRATION_4: &str = include_str!("../migrations/0004_project_sandbox.sql");
 const MIGRATION_5: &str = include_str!("../migrations/0005_plan_requirements.sql");
+const MIGRATION_6: &str = include_str!("../migrations/0006_execution.sql");

@@ -128,7 +128,12 @@ impl AgentAdapter for CodexAdapter {
         })
     }
 
-    fn command(&self, workspace: &Path, policy: &WorkspacePolicy) -> Result<AgentCommand> {
+    fn command(
+        &self,
+        workspace: &Path,
+        policy: &WorkspacePolicy,
+        model: Option<&str>,
+    ) -> Result<AgentCommand> {
         let launcher =
             Launcher::find().ok_or_else(|| crate::error::ReactorError::AgentUnavailable {
                 agent: "codex".to_owned(),
@@ -171,6 +176,10 @@ impl AgentAdapter for CodexAdapter {
             arguments.push("--add-dir".into());
             arguments.push(root.into());
         }
+        if let Some(model) = model {
+            arguments.push("--model".into());
+            arguments.push(model.into());
+        }
         arguments.push("-C".into());
         arguments.push(workspace.as_os_str().to_owned());
         arguments.push("-".into());
@@ -179,6 +188,20 @@ impl AgentAdapter for CodexAdapter {
             arguments,
             current_dir: workspace.to_owned(),
         })
+    }
+
+    fn failure_requires_review(&self, output: &str) -> bool {
+        let output = output.to_ascii_lowercase();
+        output.contains("permission denied")
+            || output.contains("operation not permitted")
+            || output.contains("read-only file system")
+            || output.contains("outside the workspace")
+            || output.contains("approval required")
+            || output.contains("requires approval")
+            || (output.contains("sandbox")
+                && (output.contains("denied")
+                    || output.contains("blocked")
+                    || output.contains("violation")))
     }
 
     fn draft_command(

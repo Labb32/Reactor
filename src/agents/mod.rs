@@ -60,12 +60,14 @@ pub trait AgentAdapter {
         policy: &WorkspacePolicy,
     ) -> Result<AgentPreflight>;
 
-    #[allow(dead_code)]
     fn command(
         &self,
         workspace: &std::path::Path,
         policy: &WorkspacePolicy,
+        model: Option<&str>,
     ) -> Result<AgentCommand>;
+
+    fn failure_requires_review(&self, output: &str) -> bool;
 
     fn draft_command(
         &self,

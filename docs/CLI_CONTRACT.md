@@ -95,6 +95,8 @@ limits:
 
 Explicit requirements may contain `writable_roots`, `network`, `mcp`, `hooks`, and `tools`. They describe the minimum expected environment and never expand the Workspace policy. Tool availability and current Workspace readiness are checked before approval.
 
+`max_wall_time_seconds` accepts 1 second through 7 days. `max_attempts` accepts 1 through 10; Reactor does not move a terminal Run back into execution.
+
 ## Schedules and queue
 
 ```shell
@@ -120,6 +122,22 @@ start_deadline_seconds: 3600
 Rule types are `immediate`, `manual`, and `at`. An `at` rule interprets `local_time` in the current user time zone captured when the schedule is created. Reactor stores its IANA name when available and otherwise stores the current UTC offset. A DST gap moves to the next valid local time; a repeated local time selects its first occurrence. A paused occurrence remains pending and becomes `MISSED` if its deadline has passed when resumed.
 
 `queue list` refreshes due occurrences and reports each queued Run with `eligible`, `dispatch_order`, and `blocked_by`. A Run that remains queued past its start deadline becomes `MISSED`. Dispatch uses Workspace FIFO, Workspace round-robin, one active Run per Workspace, and the configured global, Agent, Provider, and local endpoint limits.
+
+## Runs
+
+```shell
+reactor run next
+reactor run show <run_id>
+reactor run list
+reactor run cancel <run_id> [--idempotency-key <key>]
+reactor run retry <run_id> [--idempotency-key <key>]
+```
+
+`run next` claims and executes one eligible Run. It blocks until the Agent exits, the wall-time limit is reached, or another process requests cancellation. Cancellation stops the Agent process tree, waits up to three seconds, collects the remaining output, and then records `CANCELLED`.
+
+`run retry` accepts `FAILED`, `CANCELLED`, `LIMIT_REACHED`, and `REVIEW_REQUIRED`. It leaves the source Run unchanged and queues a new Run with the same approved Plan Version and execution snapshots.
+
+Attempt logs are stored under Reactor's data directory, rotate at 10 MiB, retain at most five files, and expire after 30 days. Sandbox permission failures become `REVIEW_REQUIRED`; Reactor does not widen the approved policy automatically.
 
 ## Events
 

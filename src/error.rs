@@ -63,6 +63,9 @@ pub enum ReactorError {
     #[error("invalid run state transition from {from} to {to}")]
     InvalidRunTransition { from: String, to: String },
 
+    #[error("run {0} was not found")]
+    RunNotFound(String),
+
     #[error("workspace ID is invalid: {0}")]
     InvalidWorkspaceId(String),
 
@@ -174,6 +177,8 @@ impl ReactorError {
             | Self::SchemaMigrationRequired { .. } => 3,
             Self::CursorExpired { .. }
             | Self::IdempotencyConflict
+            | Self::InvalidRunTransition { .. }
+            | Self::RunNotFound(_)
             | Self::WorkspaceOverlap { .. }
             | Self::WorkspaceNotFound(_)
             | Self::AgentNotReady { .. }
@@ -192,8 +197,7 @@ impl ReactorError {
             | Self::InvalidConfig { .. }
             | Self::OutputSerialization(_)
             | Self::InvalidStoredData(_)
-            | Self::Database(_)
-            | Self::InvalidRunTransition { .. } => 1,
+            | Self::Database(_) => 1,
         }
     }
 
@@ -215,6 +219,7 @@ impl ReactorError {
             Self::CursorExpired { .. } => "cursor_expired",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::InvalidRunTransition { .. } => "invalid_run_transition",
+            Self::RunNotFound(_) => "run_not_found",
             Self::InvalidWorkspaceId(_) => "invalid_workspace_id",
             Self::InvalidWorkspacePath(_) => "invalid_workspace_path",
             Self::InvalidSandboxPolicy(_) => "invalid_sandbox_policy",
@@ -246,6 +251,10 @@ impl ReactorError {
             Self::CursorExpired { requested, oldest } => {
                 serde_json::json!({ "requested": requested, "oldest": oldest })
             }
+            Self::InvalidRunTransition { from, to } => {
+                serde_json::json!({ "from": from, "to": to })
+            }
+            Self::RunNotFound(run_id) => serde_json::json!({ "run_id": run_id }),
             Self::WorkspaceOverlap { workspace_id } => {
                 serde_json::json!({ "workspace_id": workspace_id })
             }

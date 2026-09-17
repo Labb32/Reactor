@@ -12,6 +12,8 @@ const MAX_TITLE_BYTES: usize = 200;
 const MAX_CONTEXT_BYTES: usize = 1024 * 1024;
 const MAX_COMPLETION_CRITERIA: usize = 32;
 const MAX_TOOLS: usize = 32;
+const MAX_WALL_TIME_SECONDS: u64 = 7 * 24 * 60 * 60;
+const MAX_ATTEMPTS: u32 = 10;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -209,9 +211,12 @@ fn validate_input(input: &PlanInput) -> Result<()> {
                 .to_owned(),
         ));
     }
-    if input.limits.max_wall_time_seconds == 0 || input.limits.max_attempts == 0 {
+    if !(1..=MAX_WALL_TIME_SECONDS).contains(&input.limits.max_wall_time_seconds)
+        || !(1..=MAX_ATTEMPTS).contains(&input.limits.max_attempts)
+    {
         return Err(ReactorError::InvalidPlan(
-            "plan limits must be greater than zero".to_owned(),
+            "wall time must be between 1 second and 7 days, and attempts between 1 and 10"
+                .to_owned(),
         ));
     }
     validate_optional_name("provider", input.provider.as_deref())?;

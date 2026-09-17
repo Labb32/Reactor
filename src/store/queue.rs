@@ -11,8 +11,10 @@ impl Store {
         evaluate(&self.connection, config)
     }
 
-    #[allow(dead_code)]
-    pub fn claim_next_run(&mut self, config: &ConcurrencyConfig) -> Result<Option<QueueRun>> {
+    pub(crate) fn claim_next_run(
+        &mut self,
+        config: &ConcurrencyConfig,
+    ) -> Result<Option<QueueRun>> {
         self.write_transaction(|transaction| {
             super::schedules::refresh_due(transaction)?;
             let selected = evaluate(transaction, config)?
