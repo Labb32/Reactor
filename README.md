@@ -20,6 +20,8 @@ Reactor는 Windows, Linux와 macOS에서 Codex, Qwen Code, Claude Code를 실행
 
 Rust 1.88 이상과 사용할 Agent CLI가 필요합니다.
 
+운영체제별 바이너리는 [GitHub Releases](https://github.com/Labb32/Reactor/releases)에서 받을 수 있습니다.
+
 ```shell
 cargo install --path .
 reactor -v
@@ -100,6 +102,7 @@ reactor events --after <cursor> --follow --output jsonl
 - [CLI JSON 계약](docs/CLI_CONTRACT.md)
 - [Sandbox 책임 경계](docs/SANDBOX.md)
 - [시스템 설계](docs/SYSTEM_DESIGN.md)
+- [Release 안내](docs/RELEASING.md)
 - [패치 노트](PATCH_NOTES.md)
 
 ## 라이선스

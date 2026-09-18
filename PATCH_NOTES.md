@@ -7,6 +7,7 @@
 - 활성 Run이 남아 있는 Plan 삭제를 차단하고 Schedule에 실제 Run 상태를 표시하도록 수정.
 - 사용자 문서와 설치 안내를 정리하고 MIT License를 적용.
 - 영문 README와 개발 문서 목록을 추가하고 누적 개발용 Migration을 단일 초기 Schema로 정리.
+- Git tag로 운영체제별 Binary와 Checksum을 게시하는 GitHub Release 자동화를 추가.
 
 ## 0.1.11
 

@@ -20,6 +20,8 @@ Reactor runs Codex, Qwen Code, and Claude Code on Windows, Linux, and macOS. It 
 
 Reactor requires Rust 1.88 or later and at least one supported agent CLI.
 
+Platform binaries are available from [GitHub Releases](https://github.com/Labb32/Reactor/releases).
+
 ```shell
 cargo install --path .
 reactor -v
@@ -100,6 +102,7 @@ reactor events --after <cursor> --follow --output jsonl
 - [CLI JSON contract](docs/CLI_CONTRACT.md)
 - [Sandbox boundary](docs/SANDBOX.md)
 - [System design](docs/SYSTEM_DESIGN.md)
+- [Releasing](docs/RELEASING.md)
 - [Patch notes](PATCH_NOTES.md)
 
 ## License
