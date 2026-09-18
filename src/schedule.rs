@@ -5,6 +5,7 @@ use crate::error::{ReactorError, Result};
 pub const DEFAULT_DEADLINE_SECONDS: u64 = 3_600;
 const MAX_DEADLINE_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_INTERVAL_SECONDS: u64 = 365 * 24 * 60 * 60;
+const MAX_SCHEDULE_ID_BYTES: usize = 96;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -27,6 +28,32 @@ pub enum ScheduleRule {
     IntervalAfterSuccess {
         seconds: u64,
     },
+}
+
+pub fn rule_name(rule: &ScheduleRule) -> &'static str {
+    match rule {
+        ScheduleRule::Immediate => "immediate",
+        ScheduleRule::Manual => "manual",
+        ScheduleRule::At { .. } => "at",
+        ScheduleRule::Daily { .. } => "daily",
+        ScheduleRule::Weekdays { .. } => "weekdays",
+        ScheduleRule::Weekly { .. } => "weekly",
+        ScheduleRule::IntervalAfterSuccess { .. } => "interval_after_success",
+    }
+}
+
+pub fn validate_id(id: &str) -> Result<()> {
+    let mut characters = id.chars();
+    let valid_first = characters
+        .next()
+        .is_some_and(|value| value.is_ascii_alphanumeric());
+    let valid_rest = characters.all(|value| value.is_ascii_alphanumeric() || ".-_".contains(value));
+    if !valid_first || !valid_rest || id.len() > MAX_SCHEDULE_ID_BYTES {
+        return Err(ReactorError::InvalidSchedule(format!(
+            "schedule name must start with an ASCII letter or number and contain at most {MAX_SCHEDULE_ID_BYTES} letters, numbers, '.', '-', or '_'"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

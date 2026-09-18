@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 mod daemon;
+mod logs;
 mod plans;
 mod queue;
 mod runs;
@@ -22,8 +23,23 @@ use crate::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "reactor", version, about = "Schedule reviewed AI agent work")]
+#[command(
+    name = "reactor",
+    version,
+    about = "Schedule reviewed AI agent work",
+    disable_version_flag = true
+)]
 struct Cli {
+    /// Print version information.
+    #[arg(
+        short = 'v',
+        short_alias = 'V',
+        long = "version",
+        required = false,
+        action = clap::ArgAction::Version
+    )]
+    version: Option<bool>,
+
     #[arg(long, global = true, value_enum, default_value_t)]
     output: OutputFormat,
 
@@ -55,6 +71,8 @@ enum Command {
     Queue(queue::QueueArgs),
     /// Execute, inspect, and cancel runs.
     Run(runs::RunArgs),
+    /// Inspect and clean Agent run logs.
+    Log(logs::LogArgs),
 }
 
 #[derive(Debug, Args)]
@@ -107,12 +125,21 @@ const CAPABILITIES: &[&str] = &[
     "claude_adapter",
     "plan_versions",
     "named_plans",
+    "partial_plan_revision",
+    "plan_lifecycle",
     "single_schedules",
+    "named_schedules",
+    "schedule_stop_delete",
     "fair_queue",
     "run_execution",
     "run_cancellation",
     "run_results",
     "run_review",
+    "short_run_codes",
+    "meaningful_run_ids",
+    "run_list_filters",
+    "run_clear",
+    "run_log_management",
     "workspace_diff",
     "interrupted_run_recovery",
     "recurring_schedules",
@@ -133,6 +160,7 @@ fn execute(cli: &Cli) -> Result<()> {
         Command::Schedule(arguments) => schedules::execute(cli.output, arguments),
         Command::Queue(arguments) => queue::execute(cli.output, arguments),
         Command::Run(arguments) => runs::execute(cli.output, arguments),
+        Command::Log(arguments) => logs::execute(cli.output, arguments),
     }
 }
 

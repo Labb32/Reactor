@@ -28,7 +28,8 @@ CREATE TABLE plans (
     id TEXT PRIMARY KEY,
     current_version INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
 );
 
 CREATE TABLE plan_versions (
@@ -41,8 +42,11 @@ CREATE TABLE plan_versions (
     completion_criteria_json TEXT NOT NULL,
     agent_kind TEXT NOT NULL,
     model TEXT,
+    provider TEXT,
     limits_json TEXT NOT NULL,
     policy_json TEXT NOT NULL,
+    requirements_json TEXT NOT NULL DEFAULT '"inherit"',
+    workspace_policy_fingerprint TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     PRIMARY KEY (plan_id, version)
 );
@@ -69,6 +73,7 @@ CREATE TABLE schedules (
     gate_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    deleted_at TEXT,
     FOREIGN KEY (plan_id, plan_version)
         REFERENCES plan_versions(plan_id, version)
 );
@@ -102,6 +107,8 @@ CREATE TABLE runs (
     ready_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    cancel_requested_at TEXT,
+    retry_of TEXT REFERENCES runs(id),
     FOREIGN KEY (plan_id, plan_version)
         REFERENCES plan_versions(plan_id, version)
 );
@@ -112,6 +119,10 @@ WHERE state IN ('PREPARING', 'RUNNING');
 
 CREATE INDEX queued_runs_by_ready_time
 ON runs(state, ready_at, created_at);
+
+CREATE INDEX runs_by_retry_source
+ON runs(retry_of)
+WHERE retry_of IS NOT NULL;
 
 CREATE TABLE attempts (
     id TEXT PRIMARY KEY,
@@ -126,6 +137,14 @@ CREATE TABLE attempts (
     log_path TEXT NOT NULL,
     usage_json TEXT,
     UNIQUE (run_id, attempt_number)
+);
+
+CREATE TABLE run_results (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    completed_at TEXT NOT NULL,
+    manifest_path TEXT NOT NULL,
+    diff_path TEXT NOT NULL,
+    summary_json TEXT NOT NULL
 );
 
 CREATE TABLE leases (

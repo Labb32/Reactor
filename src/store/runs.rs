@@ -12,6 +12,22 @@ use crate::{
 const MAX_EVENT_CHANGED_FILES: usize = 100;
 
 impl Store {
+    pub fn record_log_deletion(&mut self, run_id: &str, deleted_files: usize) -> Result<()> {
+        self.write_transaction(|transaction| {
+            query_run(transaction, run_id)?;
+            let now = crate::time::now_utc();
+            super::write_event(
+                transaction,
+                "RUN_LOGS_DELETED",
+                "run",
+                run_id,
+                serde_json::json!({ "deleted_files": deleted_files }),
+                &now,
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn get_run(&self, run_id: &str) -> Result<RunRecord> {
         self.ensure_supported_schema()?;
         query_run(&self.connection, run_id)
@@ -24,6 +40,49 @@ impl Store {
             .prepare("SELECT id FROM runs ORDER BY julianday(created_at), rowid")?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| query_run(&self.connection, &id))
+            .collect()
+    }
+
+    pub fn list_runs_filtered(
+        &self,
+        status: Option<&str>,
+        workspace_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<RunRecord>> {
+        self.ensure_supported_schema()?;
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM runs
+             WHERE (?1 IS NULL OR state = ?1)
+               AND (?2 IS NULL OR workspace_id = ?2)
+             ORDER BY julianday(created_at) DESC, rowid DESC
+             LIMIT ?3",
+        )?;
+        let ids = statement
+            .query_map(
+                params![status, workspace_id, limit.map_or(i64::MAX, i64::from)],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| query_run(&self.connection, &id))
+            .collect()
+    }
+
+    pub fn find_runs_by_suffix(&self, suffix: &str) -> Result<Vec<RunRecord>> {
+        self.ensure_supported_schema()?;
+        let length = i64::try_from(suffix.len())
+            .map_err(|_| ReactorError::InvalidArgument("Run code is too long".to_owned()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM runs
+             WHERE length(id) >= ?1 AND substr(id, length(id) - ?1 + 1) = ?2
+             ORDER BY julianday(created_at) DESC, rowid DESC
+             LIMIT 2",
+        )?;
+        let ids = statement
+            .query_map(params![length, suffix], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids.into_iter()
             .map(|id| query_run(&self.connection, &id))
@@ -65,17 +124,20 @@ impl Store {
     }
 
     pub fn retry_run(&mut self, run_id: &str, idempotency_key: Option<&str>) -> Result<RunRecord> {
-        let new_run_id = crate::ids::new_id();
         let request = serde_json::to_vec(&serde_json::json!({
             "operation": "run_retry",
             "run_id": run_id
         }))
         .map_err(|error| ReactorError::InvalidInput(error.to_string()))?;
-        let operation = |transaction: &Transaction<'_>| retry(transaction, run_id, &new_run_id);
+        let operation = |transaction: &Transaction<'_>| retry(transaction, run_id);
         match idempotency_key {
             Some(key) => self.idempotent_write(key, &request, operation),
             None => self.write_transaction(operation),
         }
+    }
+
+    pub fn clear_run(&mut self, run_id: &str) -> Result<RunRecord> {
+        self.write_transaction(|transaction| clear_run(transaction, run_id))
     }
 
     pub(crate) fn begin_attempt(
@@ -459,7 +521,7 @@ impl Store {
     }
 }
 
-fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
+pub(super) fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
     let run = query_run(transaction, run_id)?;
     let state = parse_state(&run.state)?;
     let now = crate::time::now_utc();
@@ -523,7 +585,7 @@ fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
     query_run(transaction, run_id)
 }
 
-fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Result<RunRecord> {
+fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
     let source = query_run(transaction, run_id)?;
     let state = parse_state(&source.state)?;
     if !matches!(
@@ -535,6 +597,7 @@ fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Resul
             state.as_str()
         )));
     }
+    super::plans::query_plan(transaction, &source.plan_id, Some(source.plan_version))?;
     let already_retried: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM runs WHERE retry_of = ?1)",
         [run_id],
@@ -560,6 +623,7 @@ fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Resul
     let limits_json = serde_json::to_string(&remaining_limits)
         .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
     let now = crate::time::now_utc();
+    let new_run_id = allocate_retry_id(transaction, run_id)?;
     let changed = transaction.execute(
         "INSERT INTO runs
          (id, workspace_id, plan_id, plan_version, occurrence_id, retry_of, state, agent_kind,
@@ -569,7 +633,7 @@ fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Resul
                 provider, local_endpoint, policy_snapshot_json, ?2,
                 ?3, ?3, ?3
          FROM runs WHERE id = ?4 AND state = ?5",
-        params![new_run_id, limits_json, now, run_id, state.as_str()],
+        params![&new_run_id, limits_json, now, run_id, state.as_str()],
     )?;
     if changed != 1 {
         return Err(ReactorError::InvalidStoredData(
@@ -580,11 +644,65 @@ fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Resul
         transaction,
         "RUN_QUEUED",
         "run",
-        new_run_id,
+        &new_run_id,
         serde_json::json!({ "retry_of": run_id, "workspace_id": source.workspace_id }),
         &now,
     )?;
-    query_run(transaction, new_run_id)
+    query_run(transaction, &new_run_id)
+}
+
+fn allocate_retry_id(transaction: &Transaction<'_>, source_id: &str) -> Result<String> {
+    let base = format!("{source_id}-retry");
+    for number in 1_u32..=u32::MAX {
+        let id = format!("{base}-{number}");
+        if !run_id_reserved(transaction, &id)? {
+            return Ok(id);
+        }
+    }
+    Err(ReactorError::InvalidStoredData(
+        "could not allocate a retry Run ID".to_owned(),
+    ))
+}
+
+pub(super) fn run_id_reserved(transaction: &Transaction<'_>, run_id: &str) -> Result<bool> {
+    Ok(transaction.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM runs WHERE id = ?1
+            UNION ALL
+            SELECT 1 FROM audit_events WHERE entity_type = 'run' AND entity_id = ?1
+        )",
+        [run_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn clear_run(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
+    let run = query_run(transaction, run_id)?;
+    let state = parse_state(&run.state)?;
+    if !state.can_clear(true) {
+        return Err(ReactorError::InvalidArgument(
+            "only a completed Run can be cleared".to_owned(),
+        ));
+    }
+    let now = crate::time::now_utc();
+    transaction.execute(
+        "UPDATE runs SET retry_of = NULL WHERE retry_of = ?1",
+        [run_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM leases WHERE resource_type = 'run' AND resource_id = ?1",
+        [run_id],
+    )?;
+    transaction.execute("DELETE FROM runs WHERE id = ?1", [run_id])?;
+    write_event(
+        transaction,
+        "RUN_DELETED",
+        "run",
+        run_id,
+        serde_json::json!({ "state": &run.state, "workspace_id": &run.workspace_id }),
+        &now,
+    )?;
+    Ok(run)
 }
 
 fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {

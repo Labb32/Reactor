@@ -33,21 +33,27 @@ fn list(format: OutputFormat) -> Result<()> {
     let queue = app.store.queue(&app.config.concurrency)?;
     match format {
         OutputFormat::Text => {
-            println!("RUN ID | WORKSPACE | READY | AVAILABILITY");
-            for run in queue {
-                let availability = if run.eligible {
-                    "eligible"
-                } else {
-                    run.blocked_by.as_deref().unwrap_or("waiting")
-                };
-                println!(
-                    "{} | {} | {} | {}",
-                    run.id,
-                    run.workspace_id,
-                    output::display_time(&run.ready_at),
-                    availability
-                );
-            }
+            let rows = queue
+                .into_iter()
+                .map(|run| {
+                    let availability = if run.eligible {
+                        "eligible".to_owned()
+                    } else {
+                        run.blocked_by.unwrap_or_else(|| "waiting".to_owned())
+                    };
+                    vec![
+                        output::short_id(&run.id).to_owned(),
+                        run.id,
+                        run.workspace_id,
+                        output::display_time(&run.ready_at),
+                        availability,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            output::write_table(
+                &["CODE", "RUN ID", "WORKSPACE", "READY", "AVAILABILITY"],
+                &rows,
+            );
             Ok(())
         }
         OutputFormat::Json | OutputFormat::Jsonl => {

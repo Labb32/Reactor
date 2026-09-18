@@ -83,12 +83,73 @@ pub fn display_status(value: &str) -> String {
     let color = match value {
         "READY" | "APPROVED" | "ACTIVE" | "SUCCEEDED" | "COMPLETED" => "32",
         "FAILED" | "DEGRADED" | "MISSED" | "LIMIT_REACHED" => "31",
-        "REVIEW_REQUIRED" | "IN_REVIEW" | "DRAFT" | "WAITING" | "PAUSED" => "33",
+        "REVIEW_REQUIRED" | "IN_REVIEW" | "DRAFT" | "WAITING" | "PAUSED" | "STOPPED" => "33",
         "RUNNING" | "PREPARING" | "QUEUED" | "REGISTERED" => "36",
-        "CANCELLED" => "90",
+        "CANCELLED" | "CLEARED" => "90",
         _ => return value.to_owned(),
     };
     format!("\x1b[{color}m{value}\x1b[0m")
+}
+
+pub fn short_id(value: &str) -> &str {
+    value.get(value.len().saturating_sub(8)..).unwrap_or(value)
+}
+
+pub fn write_table(headers: &[&str], rows: &[Vec<String>]) {
+    let mut widths = headers
+        .iter()
+        .map(|header| visible_width(header))
+        .collect::<Vec<_>>();
+    for row in rows {
+        for (index, value) in row.iter().enumerate().take(widths.len()) {
+            widths[index] = widths[index].max(visible_width(value));
+        }
+    }
+    write_table_row(
+        &headers
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>(),
+        &widths,
+    );
+    for row in rows {
+        write_table_row(row, &widths);
+    }
+}
+
+fn write_table_row(row: &[String], widths: &[usize]) {
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            print!("  ");
+        }
+        let value = row.get(index).map_or("", String::as_str);
+        print!("{value}");
+        if index + 1 < widths.len() {
+            let padding = width.saturating_sub(visible_width(value));
+            print!("{}", " ".repeat(padding));
+        }
+    }
+    println!();
+}
+
+fn visible_width(value: &str) -> usize {
+    let mut escape = false;
+    value
+        .chars()
+        .filter(|character| {
+            if escape {
+                if *character == 'm' {
+                    escape = false;
+                }
+                return false;
+            }
+            if *character == '\x1b' {
+                escape = true;
+                return false;
+            }
+            true
+        })
+        .count()
 }
 
 fn colors_enabled() -> bool {

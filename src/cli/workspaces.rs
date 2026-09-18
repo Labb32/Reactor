@@ -246,15 +246,17 @@ fn workspace_list(format: OutputFormat) -> Result<()> {
     let workspaces = app.store.list_workspaces()?;
     match format {
         OutputFormat::Text => {
-            println!("ID | STATUS | PATH");
-            for workspace in workspaces {
-                println!(
-                    "{} | {} | {}",
-                    workspace.id,
-                    output::display_status(&workspace.status),
-                    workspace.canonical_path
-                );
-            }
+            let rows = workspaces
+                .into_iter()
+                .map(|workspace| {
+                    vec![
+                        workspace.id,
+                        output::display_status(&workspace.status),
+                        workspace.canonical_path,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            output::write_table(&["ID", "STATUS", "PATH"], &rows);
             Ok(())
         }
         OutputFormat::Json | OutputFormat::Jsonl => {

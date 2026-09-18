@@ -31,14 +31,14 @@ impl Default for ScheduleGate {
 impl Store {
     pub fn create_schedule(
         &mut self,
+        id: Option<&str>,
         input: &ScheduleInput,
         prepared: &PreparedSchedule,
         idempotency_key: Option<&str>,
     ) -> Result<ScheduleRecord> {
-        let id = crate::ids::new_id();
-        let request = request_bytes("schedule_create", None, input)?;
+        let request = request_bytes("schedule_create", id, input)?;
         let operation =
-            |transaction: &Transaction<'_>| insert_schedule(transaction, &id, input, prepared);
+            |transaction: &Transaction<'_>| insert_schedule(transaction, id, input, prepared);
         match idempotency_key {
             Some(key) => self.idempotent_write(key, &request, operation),
             None => self.write_transaction(operation),
@@ -52,9 +52,10 @@ impl Store {
 
     pub fn list_schedules(&self) -> Result<Vec<ScheduleRecord>> {
         self.ensure_supported_schema()?;
-        let mut statement = self
-            .connection
-            .prepare("SELECT id FROM schedules ORDER BY julianday(created_at), rowid")?;
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM schedules
+                 WHERE deleted_at IS NULL ORDER BY julianday(created_at), rowid",
+        )?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -63,20 +64,30 @@ impl Store {
             .collect()
     }
 
-    pub fn pause_schedule(
+    pub fn stop_schedule(
         &mut self,
         schedule_id: &str,
         idempotency_key: Option<&str>,
     ) -> Result<ScheduleRecord> {
-        transition_schedule(self, schedule_id, "ACTIVE", "PAUSED", idempotency_key)
+        let request = request_bytes::<()>("schedule_stop", Some(schedule_id), &())?;
+        let operation = |transaction: &Transaction<'_>| stop_schedule(transaction, schedule_id);
+        match idempotency_key {
+            Some(key) => self.idempotent_write(key, &request, operation),
+            None => self.write_transaction(operation),
+        }
     }
 
-    pub fn resume_schedule(
+    pub fn delete_schedule(
         &mut self,
         schedule_id: &str,
         idempotency_key: Option<&str>,
     ) -> Result<ScheduleRecord> {
-        transition_schedule(self, schedule_id, "PAUSED", "ACTIVE", idempotency_key)
+        let request = request_bytes::<()>("schedule_delete", Some(schedule_id), &())?;
+        let operation = |transaction: &Transaction<'_>| delete_schedule(transaction, schedule_id);
+        match idempotency_key {
+            Some(key) => self.idempotent_write(key, &request, operation),
+            None => self.write_transaction(operation),
+        }
     }
 
     pub fn trigger_schedule(
@@ -99,7 +110,7 @@ impl Store {
 
 fn insert_schedule(
     transaction: &Transaction<'_>,
-    id: &str,
+    requested_id: Option<&str>,
     input: &ScheduleInput,
     prepared: &PreparedSchedule,
 ) -> Result<ScheduleRecord> {
@@ -109,6 +120,7 @@ fn insert_schedule(
             "schedule requires an approved plan version".to_owned(),
         ));
     }
+    let id = allocate_schedule_id(transaction, requested_id, input)?;
     let quota_reset = if input.after_quota_reset {
         Some(
             plan.version
@@ -138,7 +150,7 @@ fn insert_schedule(
           gate_json, created_at, updated_at)
          VALUES (?1, ?2, ?3, 'ACTIVE', ?4, ?5, NULL, NULL, ?6, ?7, ?7)",
         params![
-            id,
+            &id,
             input.plan_id,
             plan.version.version,
             rule_json,
@@ -151,7 +163,7 @@ fn insert_schedule(
         transaction,
         "SCHEDULE_CREATED",
         "schedule",
-        id,
+        &id,
         serde_json::json!({
             "plan_id": input.plan_id,
             "plan_version": plan.version.version
@@ -165,10 +177,10 @@ fn insert_schedule(
             let scheduled = quota_reset.map_or(now, |reset| reset.max(now));
             let scheduled_at = scheduled.to_string();
             let deadline_at = deadline(scheduled, input.start_deadline_seconds)?.to_string();
-            update_schedule_window(transaction, id, &scheduled_at, &deadline_at)?;
-            let occurrence_id = insert_occurrence(transaction, id, &scheduled_at, &deadline_at)?;
+            update_schedule_window(transaction, &id, &scheduled_at, &deadline_at)?;
+            let occurrence_id = insert_occurrence(transaction, &id, &scheduled_at, &deadline_at)?;
             if scheduled <= now {
-                materialize_occurrence(transaction, id, &occurrence_id, now)?;
+                materialize_occurrence(transaction, &id, &occurrence_id, now)?;
             }
         }
         ScheduleRule::At { .. }
@@ -183,14 +195,14 @@ fn insert_schedule(
             }
             let scheduled_at = scheduled.to_string();
             let deadline_at = deadline(scheduled, input.start_deadline_seconds)?.to_string();
-            update_schedule_window(transaction, id, &scheduled_at, &deadline_at)?;
-            let occurrence_id = insert_occurrence(transaction, id, &scheduled_at, &deadline_at)?;
+            update_schedule_window(transaction, &id, &scheduled_at, &deadline_at)?;
+            let occurrence_id = insert_occurrence(transaction, &id, &scheduled_at, &deadline_at)?;
             if scheduled <= now {
-                materialize_occurrence(transaction, id, &occurrence_id, now)?;
+                materialize_occurrence(transaction, &id, &occurrence_id, now)?;
             }
         }
     }
-    query_schedule(transaction, id)
+    query_schedule(transaction, &id)
 }
 
 fn trigger(transaction: &Transaction<'_>, schedule_id: &str) -> Result<ScheduleRecord> {
@@ -224,44 +236,118 @@ fn trigger(transaction: &Transaction<'_>, schedule_id: &str) -> Result<ScheduleR
     query_schedule(transaction, schedule_id)
 }
 
-fn transition_schedule(
-    store: &mut Store,
-    schedule_id: &str,
-    expected: &str,
-    next: &str,
-    idempotency_key: Option<&str>,
-) -> Result<ScheduleRecord> {
-    let request = serde_json::to_vec(&serde_json::json!({
-        "operation": "schedule_transition",
-        "schedule_id": schedule_id,
-        "from": expected,
-        "to": next
-    }))
-    .map_err(|error| ReactorError::InvalidInput(error.to_string()))?;
-    let operation = |transaction: &Transaction<'_>| {
-        let schedule = query_schedule(transaction, schedule_id)?;
-        if schedule.status != expected {
-            return Err(invalid_transition(&schedule, next));
-        }
-        let now = crate::time::now_utc();
-        transaction.execute(
-            "UPDATE schedules SET status = ?1, updated_at = ?2 WHERE id = ?3 AND status = ?4",
-            params![next, now, schedule_id, expected],
-        )?;
-        write_event(
-            transaction,
-            "SCHEDULE_STATE_CHANGED",
-            "schedule",
-            schedule_id,
-            serde_json::json!({ "from": expected, "to": next }),
-            &now,
-        )?;
-        query_schedule(transaction, schedule_id)
-    };
-    match idempotency_key {
-        Some(key) => store.idempotent_write(key, &request, operation),
-        None => store.write_transaction(operation),
+fn stop_schedule(transaction: &Transaction<'_>, schedule_id: &str) -> Result<ScheduleRecord> {
+    let schedule = query_schedule(transaction, schedule_id)?;
+    if schedule.status == "STOPPED" {
+        return Ok(schedule);
     }
+    if !matches!(schedule.status.as_str(), "ACTIVE" | "COMPLETED") {
+        return Err(invalid_transition(&schedule, "STOPPED"));
+    }
+    let run_ids = {
+        let mut statement = transaction.prepare(
+            "SELECT r.id FROM runs r
+             JOIN schedule_occurrences so ON so.id = r.occurrence_id
+             WHERE so.schedule_id = ?1
+               AND r.state IN ('WAITING', 'QUEUED', 'PREPARING', 'RUNNING')",
+        )?;
+        let rows = statement.query_map([schedule_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for run_id in run_ids {
+        super::runs::cancel(transaction, &run_id)?;
+    }
+    let now = crate::time::now_utc();
+    transaction.execute(
+        "UPDATE schedule_occurrences SET state = 'CANCELLED'
+         WHERE schedule_id = ?1 AND state = 'WAITING'",
+        [schedule_id],
+    )?;
+    // Keep the existing storage value while exposing STOPPED through the CLI contract.
+    transaction.execute(
+        "UPDATE schedules SET status = 'PAUSED', updated_at = ?1
+         WHERE id = ?2 AND deleted_at IS NULL",
+        params![now, schedule_id],
+    )?;
+    write_event(
+        transaction,
+        "SCHEDULE_STATE_CHANGED",
+        "schedule",
+        schedule_id,
+        serde_json::json!({ "from": &schedule.status, "to": "STOPPED" }),
+        &now,
+    )?;
+    query_schedule(transaction, schedule_id)
+}
+
+fn delete_schedule(transaction: &Transaction<'_>, schedule_id: &str) -> Result<ScheduleRecord> {
+    let schedule = query_schedule(transaction, schedule_id)?;
+    if schedule.status != "STOPPED" {
+        return Err(ReactorError::InvalidSchedule(
+            "only a stopped Schedule can be deleted".to_owned(),
+        ));
+    }
+    let now = crate::time::now_utc();
+    transaction.execute(
+        "UPDATE schedules SET deleted_at = ?1, updated_at = ?1
+         WHERE id = ?2 AND deleted_at IS NULL",
+        params![now, schedule_id],
+    )?;
+    write_event(
+        transaction,
+        "SCHEDULE_DELETED",
+        "schedule",
+        schedule_id,
+        serde_json::json!({ "plan_id": &schedule.plan_id }),
+        &now,
+    )?;
+    Ok(schedule)
+}
+
+fn allocate_schedule_id(
+    transaction: &Transaction<'_>,
+    requested: Option<&str>,
+    input: &ScheduleInput,
+) -> Result<String> {
+    if let Some(id) = requested {
+        crate::schedule::validate_id(id)?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schedules WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(ReactorError::InvalidSchedule(format!(
+                "schedule name already exists: {id}"
+            )));
+        }
+        return Ok(id.to_owned());
+    }
+
+    let base = format!(
+        "{}-{}",
+        input.plan_id,
+        crate::schedule::rule_name(&input.rule)
+    );
+    for number in 1_u32..=u32::MAX {
+        let id = if number == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{number}")
+        };
+        crate::schedule::validate_id(&id)?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schedules WHERE id = ?1)",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(id);
+        }
+    }
+    Err(ReactorError::InvalidSchedule(
+        "could not allocate a schedule name".to_owned(),
+    ))
 }
 
 pub(super) fn refresh_due(transaction: &Transaction<'_>) -> Result<u32> {
@@ -271,7 +357,7 @@ pub(super) fn refresh_due(transaction: &Transaction<'_>) -> Result<u32> {
         "SELECT so.schedule_id, so.id
          FROM schedule_occurrences so
          JOIN schedules s ON s.id = so.schedule_id
-         WHERE so.state = 'WAITING' AND s.status = 'ACTIVE'
+         WHERE so.state = 'WAITING' AND s.status = 'ACTIVE' AND s.deleted_at IS NULL
            AND julianday(so.scheduled_at) <= julianday(?1)
          ORDER BY julianday(so.scheduled_at), julianday(so.created_at), so.rowid",
     )?;
@@ -403,7 +489,7 @@ fn materialize_occurrence(
 
     let plan =
         super::plans::query_plan(transaction, &schedule.plan_id, Some(schedule.plan_version))?;
-    let run_id = crate::ids::new_id();
+    let run_id = allocate_run_id(transaction, schedule_id, &occurrence.scheduled_at)?;
     transaction.execute(
         "INSERT INTO runs
          (id, workspace_id, plan_id, plan_version, occurrence_id, state, agent_kind,
@@ -472,6 +558,41 @@ fn insert_occurrence(
     Ok(id)
 }
 
+fn allocate_run_id(
+    transaction: &Transaction<'_>,
+    schedule_id: &str,
+    scheduled_at: &str,
+) -> Result<String> {
+    let timestamp = scheduled_at
+        .parse::<jiff::Timestamp>()
+        .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?
+        .to_string();
+    let compact = timestamp
+        .chars()
+        .take_while(|character| !matches!(character, '.' | 'Z'))
+        .filter(|character| character.is_ascii_digit() || *character == 'T')
+        .collect::<String>();
+    if compact.len() != 15 || compact.as_bytes().get(8) != Some(&b'T') {
+        return Err(ReactorError::InvalidStoredData(
+            "scheduled timestamp has an unsupported format".to_owned(),
+        ));
+    }
+    let base = format!("{schedule_id}-{compact}Z");
+    for number in 1_u32..=u32::MAX {
+        let id = if number == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{number}")
+        };
+        if !super::runs::run_id_reserved(transaction, &id)? {
+            return Ok(id);
+        }
+    }
+    Err(ReactorError::InvalidStoredData(
+        "could not allocate a Run ID".to_owned(),
+    ))
+}
+
 fn update_schedule_window(
     transaction: &Transaction<'_>,
     schedule_id: &str,
@@ -533,7 +654,7 @@ pub(super) fn finish_recurring_run(
             "SELECT s.id
              FROM schedules s
              JOIN schedule_occurrences so ON so.schedule_id = s.id
-             WHERE so.id = ?1 AND s.status IN ('ACTIVE', 'PAUSED')",
+             WHERE so.id = ?1 AND s.status = 'ACTIVE' AND s.deleted_at IS NULL",
             [occurrence_id],
             |row| row.get(0),
         )
@@ -601,7 +722,7 @@ fn query_schedule(connection: &Connection, schedule_id: &str) -> Result<Schedule
         .query_row(
             "SELECT plan_id, plan_version, status, rule_json, timezone, start_at,
                     start_deadline, gate_json, created_at, updated_at
-             FROM schedules WHERE id = ?1",
+             FROM schedules WHERE id = ?1 AND deleted_at IS NULL",
             [schedule_id],
             |row| {
                 Ok((
@@ -639,7 +760,11 @@ fn query_schedule(connection: &Connection, schedule_id: &str) -> Result<Schedule
         id: schedule_id.to_owned(),
         plan_id,
         plan_version,
-        status,
+        status: if status == "PAUSED" {
+            "STOPPED".to_owned()
+        } else {
+            status
+        },
         rule: from_json(&rule_json)?,
         timezone,
         start_at,
@@ -659,9 +784,16 @@ fn query_latest_occurrence(
 ) -> Result<Option<OccurrenceRecord>> {
     Ok(connection
         .query_row(
-            "SELECT id, scheduled_at, deadline_at, state, run_id, created_at
-             FROM schedule_occurrences WHERE schedule_id = ?1
-             ORDER BY rowid DESC LIMIT 1",
+            "SELECT so.id, so.scheduled_at, so.deadline_at,
+                    CASE
+                        WHEN so.run_id IS NOT NULL AND r.id IS NULL THEN 'CLEARED'
+                        ELSE COALESCE(r.state, so.state)
+                    END,
+                    so.run_id, so.created_at
+             FROM schedule_occurrences so
+             LEFT JOIN runs r ON r.id = so.run_id
+             WHERE so.schedule_id = ?1
+             ORDER BY so.rowid DESC LIMIT 1",
             [schedule_id],
             map_occurrence,
         )

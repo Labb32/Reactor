@@ -105,6 +105,13 @@ impl RunState {
                 | Self::Missed
         )
     }
+
+    pub const fn can_clear(self, include_review: bool) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::LimitReached | Self::Missed
+        ) || include_review && matches!(self, Self::ReviewRequired)
+    }
 }
 
 impl fmt::Display for RunState {

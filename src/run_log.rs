@@ -149,6 +149,48 @@ pub fn prune(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub fn remove_run_directory(root: &Path, run_id: &str) -> io::Result<()> {
+    let component = Path::new(run_id);
+    if run_id.is_empty() || matches!(run_id, "." | "..") || component.components().count() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Run ID is not a safe path component",
+        ));
+    }
+    let directory = root.join(component);
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Run log path is not a regular directory",
+        ));
+    }
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Run log directory contains a non-regular file",
+            ));
+        }
+        files.push(entry.path());
+    }
+    for file in files {
+        remove_file_if_present(&file)?;
+    }
+    match fs::remove_dir(&directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn rotated_path(path: &Path, index: usize) -> PathBuf {
     let mut value = OsString::from(path.as_os_str());
     value.push(format!(".{index}"));

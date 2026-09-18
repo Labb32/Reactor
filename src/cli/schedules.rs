@@ -6,7 +6,7 @@ use crate::{
     input, output,
     output::{Envelope, OutputFormat},
     paths::ReactorPaths,
-    schedule::{DEFAULT_DEADLINE_SECONDS, ScheduleInput, ScheduleRecord, ScheduleRule},
+    schedule::{DEFAULT_DEADLINE_SECONDS, ScheduleInput, ScheduleRecord, ScheduleRule, rule_name},
 };
 
 #[derive(Debug, Args)]
@@ -23,10 +23,10 @@ enum ScheduleCommand {
     Show(ScheduleIdArgs),
     /// List schedules.
     List,
-    /// Pause a pending schedule.
-    Pause(ScheduleMutationArgs),
-    /// Resume a paused schedule.
-    Resume(ScheduleMutationArgs),
+    /// Stop a schedule and its pending or active run.
+    Stop(ScheduleMutationArgs),
+    /// Delete a stopped schedule.
+    Delete(ScheduleMutationArgs),
     /// Trigger a manual schedule.
     Trigger(ScheduleMutationArgs),
 }
@@ -34,6 +34,10 @@ enum ScheduleCommand {
 #[derive(Debug, Args)]
 struct ScheduleAddArgs {
     plan_id: Option<String>,
+
+    /// Use a custom schedule ID.
+    #[arg(long, value_name = "ID")]
+    name: Option<String>,
 
     /// Read a schedule document from JSON or YAML.
     #[arg(long, value_name = "PATH")]
@@ -82,8 +86,8 @@ pub(super) fn execute(format: OutputFormat, arguments: &ScheduleArgs) -> Result<
         ScheduleCommand::Add(arguments) => add(format, arguments),
         ScheduleCommand::Show(arguments) => show(format, arguments),
         ScheduleCommand::List => list(format),
-        ScheduleCommand::Pause(arguments) => pause(format, arguments),
-        ScheduleCommand::Resume(arguments) => resume(format, arguments),
+        ScheduleCommand::Stop(arguments) => stop(format, arguments),
+        ScheduleCommand::Delete(arguments) => delete(format, arguments),
         ScheduleCommand::Trigger(arguments) => trigger(format, arguments),
     }
 }
@@ -93,9 +97,12 @@ fn add(format: OutputFormat, arguments: &ScheduleAddArgs) -> Result<()> {
     let prepared = crate::schedule::prepare(&input)?;
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
-    let schedule =
-        app.store
-            .create_schedule(&input, &prepared, arguments.idempotency_key.as_deref())?;
+    let schedule = app.store.create_schedule(
+        arguments.name.as_deref(),
+        &input,
+        &prepared,
+        arguments.idempotency_key.as_deref(),
+    )?;
     write_schedule(format, &app.instance_id, &schedule)
 }
 
@@ -159,25 +166,41 @@ fn list(format: OutputFormat) -> Result<()> {
     let schedules = app.store.list_schedules()?;
     match format {
         OutputFormat::Text => {
-            println!("SCHEDULE ID | STATUS | PLAN | VERSION | RUN STATUS | SCHEDULED");
-            for schedule in schedules {
-                let occurrence = schedule.occurrence.as_ref();
-                println!(
-                    "{} | {} | {} | v{} | {} | {}",
-                    schedule.id,
-                    output::display_status(&schedule.status),
-                    schedule.plan_id,
-                    schedule.plan_version,
-                    occurrence.map_or_else(
-                        || "-".to_owned(),
-                        |value| output::display_status(&value.state)
-                    ),
-                    occurrence.map_or_else(
-                        || "-".to_owned(),
-                        |value| output::display_time(&value.scheduled_at)
-                    )
-                );
-            }
+            let rows = schedules
+                .into_iter()
+                .map(|schedule| {
+                    let occurrence = schedule.occurrence.as_ref();
+                    vec![
+                        schedule.id,
+                        output::display_status(&schedule.status),
+                        schedule.plan_id,
+                        format!("v{}", schedule.plan_version),
+                        rule_name(&schedule.rule).to_owned(),
+                        format!("{}s", schedule.start_deadline_seconds),
+                        occurrence.map_or_else(
+                            || "-".to_owned(),
+                            |value| output::display_status(&value.state),
+                        ),
+                        occurrence.map_or_else(
+                            || "-".to_owned(),
+                            |value| output::display_time(&value.scheduled_at),
+                        ),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            output::write_table(
+                &[
+                    "SCHEDULE ID",
+                    "STATUS",
+                    "PLAN",
+                    "VERSION",
+                    "RULE",
+                    "DEADLINE",
+                    "RUN STATUS",
+                    "SCHEDULED",
+                ],
+                &rows,
+            );
             Ok(())
         }
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -186,22 +209,29 @@ fn list(format: OutputFormat) -> Result<()> {
     }
 }
 
-fn pause(format: OutputFormat, arguments: &ScheduleMutationArgs) -> Result<()> {
+fn stop(format: OutputFormat, arguments: &ScheduleMutationArgs) -> Result<()> {
     let mut app = open_refreshed()?;
     let schedule = app
         .store
-        .pause_schedule(&arguments.schedule_id, arguments.idempotency_key.as_deref())?;
+        .stop_schedule(&arguments.schedule_id, arguments.idempotency_key.as_deref())?;
     write_schedule(format, &app.instance_id, &schedule)
 }
 
-fn resume(format: OutputFormat, arguments: &ScheduleMutationArgs) -> Result<()> {
+fn delete(format: OutputFormat, arguments: &ScheduleMutationArgs) -> Result<()> {
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
-    app.store
-        .resume_schedule(&arguments.schedule_id, arguments.idempotency_key.as_deref())?;
-    app.store.refresh_due_schedules()?;
-    let schedule = app.store.get_schedule(&arguments.schedule_id)?;
-    write_schedule(format, &app.instance_id, &schedule)
+    let schedule = app
+        .store
+        .delete_schedule(&arguments.schedule_id, arguments.idempotency_key.as_deref())?;
+    match format {
+        OutputFormat::Text => {
+            println!("deleted schedule: {}", schedule.id);
+            Ok(())
+        }
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            output::write_json(&Envelope::new(app.instance_id, schedule))
+        }
+    }
 }
 
 fn trigger(format: OutputFormat, arguments: &ScheduleMutationArgs) -> Result<()> {
@@ -232,6 +262,15 @@ fn write_schedule(
                 output::display_status(&schedule.status)
             );
             println!("plan: {} v{}", schedule.plan_id, schedule.plan_version);
+            println!("rule: {}", rule_name(&schedule.rule));
+            if matches!(&schedule.rule, ScheduleRule::Manual) {
+                println!(
+                    "start deadline: {}s after trigger",
+                    schedule.start_deadline_seconds
+                );
+            } else {
+                println!("start deadline: {}s", schedule.start_deadline_seconds);
+            }
             if let Some(occurrence) = &schedule.occurrence {
                 println!("run status: {}", output::display_status(&occurrence.state));
                 println!(
@@ -239,7 +278,7 @@ fn write_schedule(
                     output::display_time(&occurrence.scheduled_at)
                 );
                 if let Some(run_id) = &occurrence.run_id {
-                    println!("run: {run_id}");
+                    println!("run: {run_id} ({})", output::short_id(run_id));
                 }
             }
             Ok(())

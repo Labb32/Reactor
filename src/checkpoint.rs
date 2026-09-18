@@ -60,6 +60,8 @@ pub struct DiffReport {
     pub workspace_id: String,
     pub state: String,
     pub completed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<u64>,
     pub changes: Vec<FileChange>,
 }
 
@@ -440,6 +442,7 @@ fn compare(before: &Manifest, after: &Manifest, state: &str, completed_at: &str)
         workspace_id: before.workspace_id.clone(),
         state: state.to_owned(),
         completed_at: completed_at.to_owned(),
+        token_usage: None,
         changes,
     }
 }

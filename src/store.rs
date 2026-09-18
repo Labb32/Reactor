@@ -14,7 +14,7 @@ mod runs;
 mod schedules;
 mod workspaces;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 8;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 9;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_COUNT: i64 = 100_000;
 const RUN_LEASE_DURATION: &str = "+30 seconds";
@@ -90,59 +90,14 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Exclusive)?;
 
-        match current {
-            0 => {
-                transaction.execute_batch(MIGRATION_1)?;
-                insert_instance_id(&transaction)?;
-                transaction.execute_batch(MIGRATION_5)?;
-                transaction.execute_batch(MIGRATION_6)?;
-                transaction.execute_batch(MIGRATION_7)?;
-                transaction.execute_batch(MIGRATION_8)?;
-            }
-            1 => {
-                transaction.execute_batch(MIGRATION_2)?;
-                insert_instance_id(&transaction)?;
-                transaction.execute_batch(MIGRATION_3)?;
-                transaction.execute_batch(MIGRATION_4)?;
-                transaction.execute_batch(MIGRATION_5)?;
-                transaction.execute_batch(MIGRATION_6)?;
-                transaction.execute_batch(MIGRATION_7)?;
-                transaction.execute_batch(MIGRATION_8)?;
-            }
-            2 => {
-                transaction.execute_batch(MIGRATION_3)?;
-                transaction.execute_batch(MIGRATION_4)?;
-                transaction.execute_batch(MIGRATION_5)?;
-                transaction.execute_batch(MIGRATION_6)?;
-                transaction.execute_batch(MIGRATION_7)?;
-                transaction.execute_batch(MIGRATION_8)?;
-            }
-            3 => {
-                transaction.execute_batch(MIGRATION_4)?;
-                transaction.execute_batch(MIGRATION_5)?;
-                transaction.execute_batch(MIGRATION_6)?;
-                transaction.execute_batch(MIGRATION_7)?;
-                transaction.execute_batch(MIGRATION_8)?;
-            }
-            4 => {
-                transaction.execute_batch(MIGRATION_5)?;
-                transaction.execute_batch(MIGRATION_6)?;
-                transaction.execute_batch(MIGRATION_7)?;
-                transaction.execute_batch(MIGRATION_8)?;
-            }
-            5 => {
-                transaction.execute_batch(MIGRATION_6)?;
-                transaction.execute_batch(MIGRATION_7)?;
-                transaction.execute_batch(MIGRATION_8)?;
-            }
-            6 => {
-                transaction.execute_batch(MIGRATION_7)?;
-                transaction.execute_batch(MIGRATION_8)?;
-            }
-            7 => {
-                transaction.execute_batch(MIGRATION_8)?;
-            }
-            _ => unreachable!("schema version was checked before migration"),
+        if current == 0 {
+            transaction.execute_batch(INITIAL_SCHEMA)?;
+            insert_instance_id(&transaction)?;
+        } else {
+            return Err(ReactorError::SchemaMigrationRequired {
+                found: current,
+                supported: SUPPORTED_SCHEMA_VERSION,
+            });
         }
         transaction.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
 
@@ -438,11 +393,4 @@ fn validate_idempotency_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
-const MIGRATION_2: &str = include_str!("../migrations/0002_instance_id.sql");
-const MIGRATION_3: &str = include_str!("../migrations/0003_workspace_policy.sql");
-const MIGRATION_4: &str = include_str!("../migrations/0004_project_sandbox.sql");
-const MIGRATION_5: &str = include_str!("../migrations/0005_plan_requirements.sql");
-const MIGRATION_6: &str = include_str!("../migrations/0006_execution.sql");
-const MIGRATION_7: &str = include_str!("../migrations/0007_results.sql");
-const MIGRATION_8: &str = include_str!("../migrations/0008_retry_lineage.sql");
+const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_schema.sql");

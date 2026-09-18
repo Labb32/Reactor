@@ -95,6 +95,32 @@ impl Store {
         }
     }
 
+    pub fn unapprove_plan(
+        &mut self,
+        plan_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<PlanRecord> {
+        let request = mutation_request("plan_unapprove", plan_id)?;
+        let operation = |transaction: &Transaction<'_>| unapprove_plan(transaction, plan_id);
+        match idempotency_key {
+            Some(key) => self.idempotent_write(key, &request, operation),
+            None => self.write_transaction(operation),
+        }
+    }
+
+    pub fn delete_plan(
+        &mut self,
+        plan_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<PlanRecord> {
+        let request = mutation_request("plan_delete", plan_id)?;
+        let operation = |transaction: &Transaction<'_>| delete_plan(transaction, plan_id);
+        match idempotency_key {
+            Some(key) => self.idempotent_write(key, &request, operation),
+            None => self.write_transaction(operation),
+        }
+    }
+
     pub fn get_plan(&self, plan_id: &str, version: Option<u32>) -> Result<PlanRecord> {
         self.ensure_supported_schema()?;
         query_plan(&self.connection, plan_id, version)
@@ -104,7 +130,7 @@ impl Store {
         self.ensure_supported_schema()?;
         let mut statement = self
             .connection
-            .prepare("SELECT id FROM plans ORDER BY created_at, id")?;
+            .prepare("SELECT id FROM plans WHERE deleted_at IS NULL ORDER BY created_at, id")?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -335,6 +361,102 @@ fn approve_plan(
     query_plan(transaction, plan_id, None)
 }
 
+fn unapprove_plan(transaction: &Transaction<'_>, plan_id: &str) -> Result<PlanRecord> {
+    let current = query_plan(transaction, plan_id, None)?;
+    if current.version.status != PlanStatus::Approved.as_str() {
+        return Err(ReactorError::InvalidPlanTransition {
+            plan_id: plan_id.to_owned(),
+            from: current.version.status,
+            to: PlanStatus::InReview.as_str().to_owned(),
+        });
+    }
+    ensure_version_unreferenced(transaction, plan_id, current.current_version)?;
+    transaction.execute(
+        "DELETE FROM plan_approvals WHERE plan_id = ?1 AND plan_version = ?2",
+        params![plan_id, current.current_version],
+    )?;
+    let now = crate::time::now_utc();
+    transaction.execute(
+        "UPDATE plan_versions SET status = 'IN_REVIEW' WHERE plan_id = ?1 AND version = ?2",
+        params![plan_id, current.current_version],
+    )?;
+    transaction.execute(
+        "UPDATE plans SET updated_at = ?1 WHERE id = ?2",
+        params![now, plan_id],
+    )?;
+    write_event(
+        transaction,
+        "PLAN_APPROVAL_REVOKED",
+        "plan",
+        plan_id,
+        serde_json::json!({ "version": current.current_version }),
+        &now,
+    )?;
+    query_plan(transaction, plan_id, None)
+}
+
+fn delete_plan(transaction: &Transaction<'_>, plan_id: &str) -> Result<PlanRecord> {
+    let plan = query_plan(transaction, plan_id, None)?;
+    ensure_plan_unreferenced(transaction, plan_id)?;
+    let now = crate::time::now_utc();
+    transaction.execute(
+        "UPDATE plans SET deleted_at = ?1, updated_at = ?1
+         WHERE id = ?2 AND deleted_at IS NULL",
+        params![now, plan_id],
+    )?;
+    write_event(
+        transaction,
+        "PLAN_DELETED",
+        "plan",
+        plan_id,
+        serde_json::json!({ "versions": plan.current_version }),
+        &now,
+    )?;
+    Ok(plan)
+}
+
+fn ensure_version_unreferenced(
+    transaction: &Transaction<'_>,
+    plan_id: &str,
+    version: u32,
+) -> Result<()> {
+    let referenced: bool = transaction.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM schedules WHERE plan_id = ?1 AND plan_version = ?2
+            UNION ALL
+            SELECT 1 FROM runs WHERE plan_id = ?1 AND plan_version = ?2
+        )",
+        params![plan_id, version],
+        |row| row.get(0),
+    )?;
+    if referenced {
+        return Err(ReactorError::InvalidPlan(
+            "an approved Plan Version referenced by a Schedule or Run cannot be unapproved"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_plan_unreferenced(transaction: &Transaction<'_>, plan_id: &str) -> Result<()> {
+    let referenced: bool = transaction.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM schedules WHERE plan_id = ?1 AND deleted_at IS NULL
+            UNION ALL
+            SELECT 1 FROM runs
+            WHERE plan_id = ?1 AND state IN ('WAITING', 'QUEUED', 'PREPARING', 'RUNNING')
+        )",
+        [plan_id],
+        |row| row.get(0),
+    )?;
+    if referenced {
+        return Err(ReactorError::InvalidPlan(
+            "a Plan referenced by a registered Schedule or active Run cannot be deleted".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn query_plan(
     connection: &Connection,
     plan_id: &str,
@@ -342,7 +464,8 @@ pub(super) fn query_plan(
 ) -> Result<PlanRecord> {
     let plan: Option<(u32, String, String)> = connection
         .query_row(
-            "SELECT current_version, created_at, updated_at FROM plans WHERE id = ?1",
+            "SELECT current_version, created_at, updated_at
+             FROM plans WHERE id = ?1 AND deleted_at IS NULL",
             [plan_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -461,6 +584,14 @@ fn request_bytes(operation: &str, plan_id: Option<&str>, input: &PlanInput) -> R
         "operation": operation,
         "plan_id": plan_id,
         "input": input
+    }))
+    .map_err(|error| ReactorError::InvalidInput(error.to_string()))
+}
+
+fn mutation_request(operation: &str, plan_id: &str) -> Result<Vec<u8>> {
+    serde_json::to_vec(&serde_json::json!({
+        "operation": operation,
+        "plan_id": plan_id
     }))
     .map_err(|error| ReactorError::InvalidInput(error.to_string()))
 }
