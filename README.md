@@ -1,4 +1,8 @@
-# Reactor
+<p align="center">
+  <img src="assets/reactor-logo.svg" width="160" alt="Reactor 로고">
+</p>
+
+<h1 align="center">Reactor</h1>
 
 [English](README.en.md) | 한국어
 
