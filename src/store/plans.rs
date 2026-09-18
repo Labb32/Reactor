@@ -10,21 +10,23 @@ use crate::{
 impl Store {
     pub fn create_plan(
         &mut self,
+        id: Option<&str>,
         input: &PlanInput,
         idempotency_key: Option<&str>,
     ) -> Result<PlanRecord> {
-        let id = crate::ids::new_id();
-        let request = request_bytes("plan_create", None, input)?;
+        let request = request_bytes("plan_create", id, input)?;
+        let id = id.map(str::to_owned).unwrap_or_else(crate::ids::new_id);
         self.insert_plan_with_request(&id, input, idempotency_key, &request)
     }
 
     pub fn create_drafted_plan(
         &mut self,
+        id: Option<&str>,
         input: &PlanInput,
         idempotency_key: Option<&str>,
         request: &[u8],
     ) -> Result<PlanRecord> {
-        let id = crate::ids::new_id();
+        let id = id.map(str::to_owned).unwrap_or_else(crate::ids::new_id);
         self.insert_plan_with_request(&id, input, idempotency_key, request)
     }
 
@@ -113,6 +115,16 @@ impl Store {
 }
 
 fn insert_plan(transaction: &Transaction<'_>, id: &str, input: &PlanInput) -> Result<PlanRecord> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM plans WHERE id = ?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    if exists {
+        return Err(ReactorError::InvalidPlan(format!(
+            "plan name already exists: {id}"
+        )));
+    }
     let workspace = super::workspaces::query_workspace(transaction, &input.workspace_id)?;
     validate_requirements(&input.requirements, &workspace)?;
     let now = crate::time::now_utc();

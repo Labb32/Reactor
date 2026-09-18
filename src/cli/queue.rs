@@ -33,6 +33,7 @@ fn list(format: OutputFormat) -> Result<()> {
     let queue = app.store.queue(&app.config.concurrency)?;
     match format {
         OutputFormat::Text => {
+            println!("RUN ID | WORKSPACE | READY | AVAILABILITY");
             for run in queue {
                 let availability = if run.eligible {
                     "eligible"
@@ -40,8 +41,11 @@ fn list(format: OutputFormat) -> Result<()> {
                     run.blocked_by.as_deref().unwrap_or("waiting")
                 };
                 println!(
-                    "{} {} {} {}",
-                    run.id, run.workspace_id, run.ready_at, availability
+                    "{} | {} | {} | {}",
+                    run.id,
+                    run.workspace_id,
+                    output::display_time(&run.ready_at),
+                    availability
                 );
             }
             Ok(())

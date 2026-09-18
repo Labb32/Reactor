@@ -14,6 +14,7 @@ const MAX_COMPLETION_CRITERIA: usize = 32;
 const MAX_TOOLS: usize = 32;
 const MAX_WALL_TIME_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_ATTEMPTS: u32 = 10;
+const MAX_PLAN_ID_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,6 +159,20 @@ pub fn prepare_input(mut input: PlanInput, workspace: &WorkspaceRecord) -> Resul
     );
     input.requirements = normalize_requirements(&input.requirements, workspace)?;
     Ok(input)
+}
+
+pub fn validate_id(id: &str) -> Result<()> {
+    let mut characters = id.chars();
+    let valid_first = characters
+        .next()
+        .is_some_and(|value| value.is_ascii_alphanumeric());
+    let valid_rest = characters.all(|value| value.is_ascii_alphanumeric() || ".-_".contains(value));
+    if !valid_first || !valid_rest || id.len() > MAX_PLAN_ID_BYTES {
+        return Err(ReactorError::InvalidPlan(format!(
+            "plan name must start with an ASCII letter or number and contain at most {MAX_PLAN_ID_BYTES} letters, numbers, '.', '-', or '_'"
+        )));
+    }
+    Ok(())
 }
 
 pub fn validate_requirements(

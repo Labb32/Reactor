@@ -106,11 +106,13 @@ const CAPABILITIES: &[&str] = &[
     "qwen_adapter",
     "claude_adapter",
     "plan_versions",
+    "named_plans",
     "single_schedules",
     "fair_queue",
     "run_execution",
     "run_cancellation",
     "run_results",
+    "run_review",
     "workspace_diff",
     "interrupted_run_recovery",
     "recurring_schedules",
@@ -268,7 +270,10 @@ fn write_event(format: OutputFormat, instance_id: &str, event: AuditEvent) -> Re
         OutputFormat::Text => {
             println!(
                 "{} {} {} {}",
-                event.cursor, event.occurred_at, event.event_type, event.entity_id
+                event.cursor,
+                output::display_time(&event.occurred_at),
+                event.event_type,
+                event.entity_id
             );
             Ok(())
         }

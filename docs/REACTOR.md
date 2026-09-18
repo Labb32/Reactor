@@ -146,7 +146,7 @@ reactor service install|start|stop|status|uninstall
 reactor workspace add|prepare|status|list
 reactor plan create|draft|show|revise|review|approve
 reactor schedule add|show|list|pause|resume|trigger
-reactor run next|show|progress|result|diff|list|cancel|retry
+reactor run next|show|progress|result|diff|review|list|cancel|retry
 reactor queue list
 reactor events --after <cursor> [--follow]
 ```

@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use clap::ValueEnum;
 use serde::Serialize;
@@ -62,6 +62,49 @@ pub fn escape_control(value: &str) -> String {
         }
         output
     })
+}
+
+pub fn display_time(value: &str) -> String {
+    value
+        .parse::<jiff::Timestamp>()
+        .map(|timestamp| {
+            timestamp
+                .to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M:%S %:z")
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.to_owned())
+}
+
+pub fn display_status(value: &str) -> String {
+    if !colors_enabled() {
+        return value.to_owned();
+    }
+    let color = match value {
+        "READY" | "APPROVED" | "ACTIVE" | "SUCCEEDED" | "COMPLETED" => "32",
+        "FAILED" | "DEGRADED" | "MISSED" | "LIMIT_REACHED" => "31",
+        "REVIEW_REQUIRED" | "IN_REVIEW" | "DRAFT" | "WAITING" | "PAUSED" => "33",
+        "RUNNING" | "PREPARING" | "QUEUED" | "REGISTERED" => "36",
+        "CANCELLED" => "90",
+        _ => return value.to_owned(),
+    };
+    format!("\x1b[{color}m{value}\x1b[0m")
+}
+
+fn colors_enabled() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() || !io::stdout().is_terminal() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("WT_SESSION").is_some()
+            || std::env::var_os("ANSICON").is_some()
+            || std::env::var("ConEmuANSI").is_ok_and(|value| value == "ON")
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("TERM").is_ok_and(|value| value != "dumb")
+    }
 }
 
 pub fn write_error(

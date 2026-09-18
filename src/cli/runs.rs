@@ -27,6 +27,8 @@ enum RunCommand {
     Result(RunIdArgs),
     /// Show the retained workspace diff for a run.
     Diff(RunIdArgs),
+    /// Show details needed to review an interrupted run.
+    Review(RunIdArgs),
     /// List runs.
     List,
     /// Cancel a queued or active run.
@@ -55,6 +57,7 @@ pub(super) fn execute(format: OutputFormat, arguments: &RunArgs) -> Result<()> {
         RunCommand::Progress(arguments) => show(format, arguments),
         RunCommand::Result(arguments) => result(format, arguments),
         RunCommand::Diff(arguments) => diff(format, arguments),
+        RunCommand::Review(arguments) => review(format, arguments),
         RunCommand::List => list(format),
         RunCommand::Cancel(arguments) => cancel(format, arguments),
         RunCommand::Retry(arguments) => retry(format, arguments),
@@ -70,8 +73,8 @@ fn result(format: OutputFormat, arguments: &RunIdArgs) -> Result<()> {
     })?;
     match format {
         OutputFormat::Text => {
-            println!("state: {}", result.state);
-            println!("completed: {}", result.completed_at);
+            println!("state: {}", output::display_status(&result.state));
+            println!("completed: {}", output::display_time(&result.completed_at));
             if let Some(reason) = &result.termination_reason {
                 println!("reason: {reason}");
             }
@@ -156,14 +159,66 @@ fn show(format: OutputFormat, arguments: &RunIdArgs) -> Result<()> {
     write_run(format, &app.instance_id, &run)
 }
 
+fn review(format: OutputFormat, arguments: &RunIdArgs) -> Result<()> {
+    let paths = ReactorPaths::discover()?;
+    let app = App::open(&paths)?;
+    let run = app.store.get_run(&arguments.run_id)?;
+    if run.state != "REVIEW_REQUIRED" {
+        return Err(ReactorError::InvalidArgument(format!(
+            "run {} is not waiting for review",
+            arguments.run_id
+        )));
+    }
+    match format {
+        OutputFormat::Text => {
+            write_run_text(&run)?;
+            if let Some(attempt) = &run.attempt
+                && let Some(reason) = &attempt.termination_reason
+            {
+                println!("reason: {reason}");
+            }
+            if let Some(result) = &run.result {
+                println!("changed files: {}", result.changed_files.len());
+                println!("diff: {}", result.diff_path);
+            }
+            Ok(())
+        }
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            output::write_json(&Envelope::new(app.instance_id, run))
+        }
+    }
+}
+
 fn list(format: OutputFormat) -> Result<()> {
     let paths = ReactorPaths::discover()?;
     let app = App::open(&paths)?;
     let runs = app.store.list_runs()?;
     match format {
         OutputFormat::Text => {
+            println!("RUN ID | STATE | WORKSPACE | STARTED | COMPLETED");
             for run in runs {
-                println!("{} {} {}", run.id, run.state, run.workspace_id);
+                let started = run.attempt.as_ref().map_or_else(
+                    || "-".to_owned(),
+                    |attempt| output::display_time(&attempt.started_at),
+                );
+                let completed = run.result.as_ref().map_or_else(
+                    || {
+                        run.attempt
+                            .as_ref()
+                            .and_then(|attempt| attempt.ended_at.as_deref())
+                            .map(output::display_time)
+                            .unwrap_or_else(|| "-".to_owned())
+                    },
+                    |result| output::display_time(&result.completed_at),
+                );
+                println!(
+                    "{} | {} | {} | {} | {}",
+                    run.id,
+                    output::display_status(&run.state),
+                    run.workspace_id,
+                    started,
+                    completed
+                );
             }
             Ok(())
         }
@@ -202,11 +257,17 @@ fn write_run(format: OutputFormat, instance_id: &str, run: &RunRecord) -> Result
 
 fn write_run_text(run: &RunRecord) -> Result<()> {
     println!("run: {}", run.id);
-    println!("state: {}", run.state);
+    println!("state: {}", output::display_status(&run.state));
     println!("workspace: {}", run.workspace_id);
     println!("plan: {} v{}", run.plan_id, run.plan_version);
+    println!("created: {}", output::display_time(&run.created_at));
+    println!("ready: {}", output::display_time(&run.ready_at));
     if let Some(attempt) = &run.attempt {
         println!("attempt: {}", attempt.attempt_number);
+        println!("started: {}", output::display_time(&attempt.started_at));
+        if let Some(ended_at) = &attempt.ended_at {
+            println!("ended: {}", output::display_time(ended_at));
+        }
         println!("log: {}", attempt.log_path);
     }
     Ok(())

@@ -159,10 +159,23 @@ fn list(format: OutputFormat) -> Result<()> {
     let schedules = app.store.list_schedules()?;
     match format {
         OutputFormat::Text => {
+            println!("SCHEDULE ID | STATUS | PLAN | VERSION | RUN STATUS | SCHEDULED");
             for schedule in schedules {
+                let occurrence = schedule.occurrence.as_ref();
                 println!(
-                    "{} {} {} v{}",
-                    schedule.id, schedule.status, schedule.plan_id, schedule.plan_version
+                    "{} | {} | {} | v{} | {} | {}",
+                    schedule.id,
+                    output::display_status(&schedule.status),
+                    schedule.plan_id,
+                    schedule.plan_version,
+                    occurrence.map_or_else(
+                        || "-".to_owned(),
+                        |value| output::display_status(&value.state)
+                    ),
+                    occurrence.map_or_else(
+                        || "-".to_owned(),
+                        |value| output::display_time(&value.scheduled_at)
+                    )
                 );
             }
             Ok(())
@@ -214,11 +227,20 @@ fn write_schedule(
     match format {
         OutputFormat::Text => {
             println!("schedule: {}", schedule.id);
-            println!("status: {}", schedule.status);
+            println!(
+                "schedule status: {}",
+                output::display_status(&schedule.status)
+            );
             println!("plan: {} v{}", schedule.plan_id, schedule.plan_version);
             if let Some(occurrence) = &schedule.occurrence {
-                println!("occurrence: {}", occurrence.state);
-                println!("scheduled at: {}", occurrence.scheduled_at);
+                println!("run status: {}", output::display_status(&occurrence.state));
+                println!(
+                    "scheduled: {}",
+                    output::display_time(&occurrence.scheduled_at)
+                );
+                if let Some(run_id) = &occurrence.run_id {
+                    println!("run: {run_id}");
+                }
             }
             Ok(())
         }

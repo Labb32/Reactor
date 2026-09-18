@@ -8,7 +8,13 @@
 
 ## Testing
 
-- Do not create, modify, or run tests unless the user explicitly requests it.
+- Do not build the project or create, modify, or run tests.
+- The user handles builds and tests.
+
+## Error reports
+
+- For an error report, analyze and report only the cause and the intended fix.
+- Modify code only when the user explicitly requests the fix.
 
 ## Versioning
 

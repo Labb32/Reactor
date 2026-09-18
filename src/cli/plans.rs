@@ -7,7 +7,7 @@ use crate::{
     input, output,
     output::{Envelope, OutputFormat},
     paths::ReactorPaths,
-    plan::{PlanInput, PlanLimits, PlanRecord, prepare_input, validate_tools},
+    plan::{PlanInput, PlanLimits, PlanRecord, prepare_input, validate_id, validate_tools},
     plan_draft,
 };
 
@@ -40,6 +40,10 @@ struct PlanWriteArgs {
     /// Read a plan document from JSON or YAML.
     #[arg(long, value_name = "PATH")]
     file: Option<String>,
+
+    /// Use a short Plan identifier instead of a generated ID.
+    #[arg(long)]
+    name: Option<String>,
 
     #[arg(long)]
     workspace: Option<String>,
@@ -75,6 +79,10 @@ struct PlanWriteArgs {
 
 #[derive(Debug, Args)]
 struct PlanDraftArgs {
+    /// Use a short Plan identifier instead of a generated ID.
+    #[arg(long)]
+    name: Option<String>,
+
     #[arg(long)]
     workspace: String,
 
@@ -159,6 +167,9 @@ pub(super) fn execute(format: OutputFormat, arguments: &PlanArgs) -> Result<()> 
 }
 
 fn draft(format: OutputFormat, arguments: &PlanDraftArgs) -> Result<()> {
+    if let Some(name) = arguments.name.as_deref() {
+        validate_id(name)?;
+    }
     let context = input::read_text(&arguments.file)?;
     if context.trim().is_empty() || context.len() > 1024 * 1024 {
         return Err(ReactorError::InvalidPlan(
@@ -201,21 +212,29 @@ fn draft(format: OutputFormat, arguments: &PlanDraftArgs) -> Result<()> {
         },
     );
     let input = prepare_input(input, &workspace)?;
-    let plan =
-        app.store
-            .create_drafted_plan(&input, arguments.idempotency_key.as_deref(), &request)?;
+    let plan = app.store.create_drafted_plan(
+        arguments.name.as_deref(),
+        &input,
+        arguments.idempotency_key.as_deref(),
+        &request,
+    )?;
     write_plan(format, &app.instance_id, &plan)
 }
 
 fn create(format: OutputFormat, arguments: &PlanWriteArgs) -> Result<()> {
+    if let Some(name) = arguments.name.as_deref() {
+        validate_id(name)?;
+    }
     let input = plan_input(arguments)?;
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let workspace = app.store.get_workspace(&input.workspace_id)?;
     let input = prepare_input(input, &workspace)?;
-    let plan = app
-        .store
-        .create_plan(&input, arguments.idempotency_key.as_deref())?;
+    let plan = app.store.create_plan(
+        arguments.name.as_deref(),
+        &input,
+        arguments.idempotency_key.as_deref(),
+    )?;
     write_plan(format, &app.instance_id, &plan)
 }
 
@@ -311,10 +330,14 @@ fn list(format: OutputFormat) -> Result<()> {
     let plans = app.store.list_plans()?;
     match format {
         OutputFormat::Text => {
+            println!("ID | VERSION | STATUS | TITLE");
             for plan in plans {
                 println!(
-                    "{} v{} {} {}",
-                    plan.id, plan.current_version, plan.version.status, plan.version.title
+                    "{} | v{} | {} | {}",
+                    plan.id,
+                    plan.current_version,
+                    output::display_status(&plan.version.status),
+                    plan.version.title
                 );
             }
             Ok(())
@@ -328,10 +351,14 @@ fn list(format: OutputFormat) -> Result<()> {
 fn review(format: OutputFormat, arguments: &PlanMutationArgs) -> Result<()> {
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
-    let plan = app
-        .store
-        .review_plan(&arguments.plan_id, arguments.idempotency_key.as_deref())?;
-    write_plan(format, &app.instance_id, &plan)
+    let current = app.store.get_plan(&arguments.plan_id, None)?;
+    let plan = if current.version.status == "DRAFT" {
+        app.store
+            .review_plan(&arguments.plan_id, arguments.idempotency_key.as_deref())?
+    } else {
+        current
+    };
+    write_plan_review(format, &app.instance_id, &plan)
 }
 
 fn approve(format: OutputFormat, arguments: &PlanApproveArgs) -> Result<()> {
@@ -376,6 +403,7 @@ fn default_approver() -> String {
 fn draft_request(arguments: &PlanDraftArgs, context: &str) -> Result<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({
         "operation": "plan_draft",
+        "name": arguments.name,
         "workspace_id": arguments.workspace,
         "agent": arguments.agent,
         "provider": arguments.provider,
@@ -394,7 +422,7 @@ fn write_plan(format: OutputFormat, instance_id: &str, plan: &PlanRecord) -> Res
         OutputFormat::Text => {
             println!("plan: {}", plan.id);
             println!("version: {}", plan.version.version);
-            println!("status: {}", plan.version.status);
+            println!("status: {}", output::display_status(&plan.version.status));
             println!("title: {}", plan.version.title);
             Ok(())
         }
@@ -402,4 +430,57 @@ fn write_plan(format: OutputFormat, instance_id: &str, plan: &PlanRecord) -> Res
             output::write_json(&Envelope::new(instance_id, plan))
         }
     }
+}
+
+fn write_plan_review(format: OutputFormat, instance_id: &str, plan: &PlanRecord) -> Result<()> {
+    match format {
+        OutputFormat::Text => {
+            write_plan(OutputFormat::Text, instance_id, plan)?;
+            println!("workspace: {}", plan.version.workspace_id);
+            println!("agent: {}", plan.version.agent.as_str());
+            println!(
+                "provider: {}",
+                plan.version.provider.as_deref().unwrap_or("-")
+            );
+            println!("model: {}", plan.version.model.as_deref().unwrap_or("-"));
+            println!(
+                "requirements: {}",
+                compact_json(&plan.version.requirements)?
+            );
+            println!(
+                "sandbox policy: {}",
+                compact_json(&plan.version.policy_snapshot)?
+            );
+            println!(
+                "limits: wall={}s, attempts={}, tokens={}",
+                plan.version.limits.max_wall_time_seconds,
+                plan.version.limits.max_attempts,
+                plan.version
+                    .limits
+                    .max_tokens
+                    .map_or_else(|| "-".to_owned(), |value| value.to_string())
+            );
+            println!("context:");
+            println!("{}", plan.version.context);
+            if !plan.version.completion_criteria.is_empty() {
+                println!("completion criteria:");
+                for criterion in &plan.version.completion_criteria {
+                    println!("- {criterion}");
+                }
+            }
+            if let Some(approval) = &plan.version.approval {
+                println!("approved by: {}", approval.approved_by);
+                println!("approved: {}", output::display_time(&approval.approved_at));
+            }
+            Ok(())
+        }
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            output::write_json(&Envelope::new(instance_id, plan))
+        }
+    }
+}
+
+fn compact_json(value: &impl serde::Serialize) -> Result<String> {
+    serde_json::to_string(value)
+        .map_err(|error| ReactorError::OutputSerialization(error.to_string()))
 }

@@ -246,10 +246,13 @@ fn workspace_list(format: OutputFormat) -> Result<()> {
     let workspaces = app.store.list_workspaces()?;
     match format {
         OutputFormat::Text => {
+            println!("ID | STATUS | PATH");
             for workspace in workspaces {
                 println!(
-                    "{} {} {}",
-                    workspace.id, workspace.status, workspace.canonical_path
+                    "{} | {} | {}",
+                    workspace.id,
+                    output::display_status(&workspace.status),
+                    workspace.canonical_path
                 );
             }
             Ok(())
@@ -361,9 +364,13 @@ fn write_workspace(
         OutputFormat::Text => {
             println!("workspace: {}", workspace.id);
             println!("path: {}", workspace.canonical_path);
-            println!("status: {}", workspace.status);
+            println!("status: {}", output::display_status(&workspace.status));
             for agent in &workspace.agents {
-                println!("agent {}: {}", agent.agent_kind, agent.status);
+                println!(
+                    "agent {}: {}",
+                    agent.agent_kind,
+                    output::display_status(&agent.status)
+                );
             }
             Ok(())
         }
