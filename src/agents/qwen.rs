@@ -78,7 +78,7 @@ impl AgentAdapter for QwenAdapter {
             });
         }
         let launcher = launcher()?;
-        let mut arguments = launcher.prefix;
+        let mut arguments = Vec::new();
         arguments.extend(
             [
                 "--output-format",
@@ -102,6 +102,7 @@ impl AgentAdapter for QwenAdapter {
             arguments.push("--model".into());
             arguments.push(model.into());
         }
+        let arguments = launcher.arguments(arguments);
         Ok(AgentCommand {
             program: launcher.program,
             arguments,
@@ -134,7 +135,7 @@ impl AgentAdapter for QwenAdapter {
         model: Option<&str>,
     ) -> Result<AgentCommand> {
         let launcher = launcher()?;
-        let mut arguments = launcher.prefix;
+        let mut arguments = Vec::new();
         arguments.extend(
             [
                 "--safe-mode",
@@ -151,6 +152,7 @@ impl AgentAdapter for QwenAdapter {
             arguments.push("--model".into());
             arguments.push(model.into());
         }
+        let arguments = launcher.arguments(arguments);
         Ok(AgentCommand {
             program: launcher.program,
             arguments,

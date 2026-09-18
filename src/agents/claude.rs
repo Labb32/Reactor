@@ -85,7 +85,7 @@ impl AgentAdapter for ClaudeAdapter {
     ) -> Result<AgentCommand> {
         let launcher = launcher()?;
         let settings = execution_settings(policy)?;
-        let mut arguments = launcher.prefix;
+        let mut arguments = Vec::new();
         arguments.extend(
             [
                 "-p",
@@ -127,6 +127,7 @@ impl AgentAdapter for ClaudeAdapter {
             arguments.push("--model".into());
             arguments.push(model.into());
         }
+        let arguments = launcher.arguments(arguments);
         Ok(AgentCommand {
             program: launcher.program,
             arguments,
@@ -160,7 +161,7 @@ impl AgentAdapter for ClaudeAdapter {
     ) -> Result<AgentCommand> {
         let launcher = launcher()?;
         let schema = fs::read_to_string(schema).map_err(|source| io_error(schema, source))?;
-        let mut arguments = launcher.prefix;
+        let mut arguments = Vec::new();
         arguments.extend(
             [
                 "-p",
@@ -183,6 +184,7 @@ impl AgentAdapter for ClaudeAdapter {
             arguments.push("--model".into());
             arguments.push(model.into());
         }
+        let arguments = launcher.arguments(arguments);
         Ok(AgentCommand {
             program: launcher.program,
             arguments,

@@ -143,7 +143,7 @@ impl AgentAdapter for CodexAdapter {
                 reason: "not_installed".to_owned(),
             }
         })?;
-        let mut arguments = launcher.prefix;
+        let mut arguments = Vec::new();
         arguments.extend(
             [
                 "--ask-for-approval",
@@ -187,6 +187,7 @@ impl AgentAdapter for CodexAdapter {
         arguments.push("-C".into());
         arguments.push(workspace.as_os_str().to_owned());
         arguments.push("-".into());
+        let arguments = launcher.arguments(arguments);
         Ok(AgentCommand {
             program: launcher.program,
             arguments,
@@ -224,7 +225,7 @@ impl AgentAdapter for CodexAdapter {
                 reason: "not_installed".to_owned(),
             }
         })?;
-        let mut arguments = launcher.prefix;
+        let mut arguments = Vec::new();
         arguments.extend(
             [
                 "--ask-for-approval",
@@ -256,6 +257,7 @@ impl AgentAdapter for CodexAdapter {
         arguments.push("-C".into());
         arguments.push(workspace.into());
         arguments.push("-".into());
+        let arguments = launcher.arguments(arguments);
         Ok(AgentCommand {
             program: launcher.program,
             arguments,
