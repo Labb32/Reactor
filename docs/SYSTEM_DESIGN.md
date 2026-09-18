@@ -147,6 +147,14 @@ v1은 Plugin 대신 `AgentKind` Enum과 Codex, Qwen Code, Claude Module을 사�
 
 지원 최소 Version은 비대화형 실행, 권한 Mode와 안정적인 결과 판별 기능을 모두 제공하는 Version으로 Adapter별 고정한다. Quota Reset 정보를 안정적으로 제공하지 않는 Agent나 Provider에는 Quota Gate를 노출하지 않는다.
 
+| Agent | 최소 Version | 기본 Provider Group | 제한 |
+|---|---:|---|---|
+| Codex | 0.154.0 | `openai` | Git Workspace 필요 |
+| Qwen Code | 0.24.0 | `qwen` | Hook 차단 정책 미지원 |
+| Claude Code | 2.1.259 | `anthropic` | Native Windows Sandbox 미지원 |
+
+Plan에 Provider가 없으면 Adapter의 기본 Group을 저장한다. 명시한 Provider는 그대로 사용한다. 모든 Adapter는 같은 Plan, Queue, Run 결과 계약을 사용하고 실행 인자와 출력 형식 차이는 Adapter 내부에서 처리한다.
+
 ## Process Supervisor
 
 - Unix: Process Group 단위 종료
@@ -240,7 +248,8 @@ Agent 인증과 Workspace 권한을 그대로 사용하기 위해 관리자 권�
 3. Context Plan 승인과 단일 예약
 4. Queue, Process 감시와 상태 조회
 5. Checkpoint, Diff와 중단 처리
-6. 반복 예약, 한도, Qwen Code와 Claude
+6. 반복 예약, 한도와 Daemon 자동 시작
+7. Qwen Code와 Claude Adapter
 
 ## 참고
 

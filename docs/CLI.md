@@ -1,6 +1,6 @@
 # CLI guide
 
-Reactor stores reviewed Agent work, schedules it, and records its result and file diff. The current adapter supports Codex.
+Reactor stores reviewed Agent work, schedules it, and records its result and file diff. It supports Codex, Qwen Code, and Claude Code.
 
 ## Quick start
 
@@ -12,12 +12,14 @@ reactor init
 
 Initialization registers and starts the per-user daemon. Use `reactor init --no-autostart` to initialize data only.
 
-Register a project and verify Codex readiness.
+Register a project and verify the selected Agent.
 
 ```shell
 reactor workspace add ./project --id project
 reactor workspace prepare project --agent codex
 ```
+
+Use `--agent qwen` or `--agent claude` for another adapter. Prepare every Agent used by a Plan.
 
 Create, review, and approve the Plan. Copy the Plan ID from the first command.
 

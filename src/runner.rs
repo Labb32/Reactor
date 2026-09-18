@@ -554,6 +554,7 @@ fn process_command(agent: &AgentCommand) -> Command {
     let mut command = Command::new(&agent.program);
     command
         .args(&agent.arguments)
+        .envs(agent.environment.iter().map(|(key, value)| (key, value)))
         .current_dir(&agent.current_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

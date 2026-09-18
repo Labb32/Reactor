@@ -10,7 +10,6 @@ use std::{
 use crate::{
     agents::AgentKind,
     error::{ReactorError, Result, io_error},
-    input,
     paths::ReactorPaths,
     plan::AgentPlanDraft,
     process_supervisor::ProcessSupervisor,
@@ -20,6 +19,7 @@ use crate::{
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 pub const MAX_TIMEOUT_SECONDS: u64 = 3_600;
 const MAX_AGENT_ERROR_BYTES: usize = 16 * 1024;
+const MAX_AGENT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const STOP_GRACE_PERIOD: Duration = Duration::from_secs(3);
 const DRAFT_SCHEMA: &str = r#"{
   "type": "object",
@@ -91,9 +91,10 @@ fn generate_inner(
     let mut process = Command::new(&command.program);
     process
         .args(&command.arguments)
+        .envs(command.environment.iter().map(|(key, value)| (key, value)))
         .current_dir(&command.current_dir)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut supervisor = ProcessSupervisor::spawn(process)
         .map_err(|source| io_error(&command.current_dir, source))?;
@@ -101,6 +102,12 @@ fn generate_inner(
     if let Some(mut stderr) = supervisor.take_stderr() {
         thread::spawn(move || {
             let _ = stderr_sender.send(read_agent_error(&mut stderr));
+        });
+    }
+    let (stdout_sender, stdout_receiver) = mpsc::sync_channel(1);
+    if let Some(mut stdout) = supervisor.take_stdout() {
+        thread::spawn(move || {
+            let _ = stdout_sender.send(read_agent_output(&mut stdout));
         });
     }
 
@@ -159,9 +166,38 @@ fn generate_inner(
             });
         }
     }
-    let bytes = input::read_file(output_path)?;
+    let stdout = stdout_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| ReactorError::AgentUnavailable {
+            agent: agent.as_str().to_owned(),
+            reason: "Agent output did not close".to_owned(),
+        })?
+        .map_err(|source| io_error("agent stdout", source))?;
+    let bytes = agent.adapter().read_draft(&stdout, output_path)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| ReactorError::InvalidInput(format!("invalid Agent draft: {error}")))
+}
+
+fn read_agent_output(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    let mut exceeded = false;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_AGENT_OUTPUT_BYTES.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..read.min(remaining)]);
+        exceeded |= read > remaining;
+    }
+    if exceeded {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Agent output exceeds 4 MiB",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn read_agent_error(reader: &mut impl Read) -> String {

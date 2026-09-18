@@ -103,6 +103,8 @@ const CAPABILITIES: &[&str] = &[
     "cursor_events",
     "workspace_registry",
     "codex_adapter",
+    "qwen_adapter",
+    "claude_adapter",
     "plan_versions",
     "single_schedules",
     "fair_queue",

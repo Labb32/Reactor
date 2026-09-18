@@ -1,10 +1,13 @@
-use std::{ffi::OsString, path::Path, process::Command};
+use std::{ffi::OsString, fs, path::Path, process::Command};
 
 use semver::Version;
 
 use crate::{
-    agents::{AgentAdapter, AgentCommand, AgentPreflight},
-    error::Result,
+    agents::{
+        AgentAdapter, AgentCommand, AgentPreflight, launcher::Launcher, output_version,
+        sandbox_failure,
+    },
+    error::{Result, io_error},
     workspace::WorkspacePolicy,
 };
 
@@ -18,16 +21,14 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn preflight(&self, workspace: &Path, policy: &WorkspacePolicy) -> Result<AgentPreflight> {
-        let Some(launcher) = Launcher::find() else {
+        let Some(launcher) = Launcher::find("codex") else {
             return Ok(failed("not_installed"));
         };
         let version_output = match launcher.command(["--version"]).output() {
             Ok(output) if output.status.success() => output,
             _ => return Ok(failed("version_check_failed")),
         };
-        let version = String::from_utf8_lossy(&version_output.stdout)
-            .split_whitespace()
-            .find_map(|value| Version::parse(value).ok());
+        let version = output_version(&version_output);
         let minimum = Version::new(0, 154, 0);
         let Some(version) = version else {
             return Ok(failed("version_unknown"));
@@ -136,11 +137,12 @@ impl AgentAdapter for CodexAdapter {
         policy: &WorkspacePolicy,
         model: Option<&str>,
     ) -> Result<AgentCommand> {
-        let launcher =
-            Launcher::find().ok_or_else(|| crate::error::ReactorError::AgentUnavailable {
+        let launcher = Launcher::find("codex").ok_or_else(|| {
+            crate::error::ReactorError::AgentUnavailable {
                 agent: "codex".to_owned(),
                 reason: "not_installed".to_owned(),
-            })?;
+            }
+        })?;
         let mut arguments = launcher.prefix;
         arguments.extend(
             [
@@ -188,22 +190,13 @@ impl AgentAdapter for CodexAdapter {
         Ok(AgentCommand {
             program: launcher.program,
             arguments,
+            environment: Vec::new(),
             current_dir: workspace.to_owned(),
         })
     }
 
     fn failure_requires_review(&self, output: &str) -> bool {
-        let output = output.to_ascii_lowercase();
-        output.contains("permission denied")
-            || output.contains("operation not permitted")
-            || output.contains("read-only file system")
-            || output.contains("outside the workspace")
-            || output.contains("approval required")
-            || output.contains("requires approval")
-            || (output.contains("sandbox")
-                && (output.contains("denied")
-                    || output.contains("blocked")
-                    || output.contains("violation")))
+        sandbox_failure(output)
     }
 
     fn token_usage(&self, output: &str) -> Option<u64> {
@@ -214,6 +207,10 @@ impl AgentAdapter for CodexAdapter {
         Ok(None)
     }
 
+    fn provider_group(&self, configured: Option<&str>) -> String {
+        configured.unwrap_or("openai").to_owned()
+    }
+
     fn draft_command(
         &self,
         workspace: &Path,
@@ -221,11 +218,12 @@ impl AgentAdapter for CodexAdapter {
         output: &Path,
         model: Option<&str>,
     ) -> Result<AgentCommand> {
-        let launcher =
-            Launcher::find().ok_or_else(|| crate::error::ReactorError::AgentUnavailable {
+        let launcher = Launcher::find("codex").ok_or_else(|| {
+            crate::error::ReactorError::AgentUnavailable {
                 agent: "codex".to_owned(),
                 reason: "not_installed".to_owned(),
-            })?;
+            }
+        })?;
         let mut arguments = launcher.prefix;
         arguments.extend(
             [
@@ -261,8 +259,13 @@ impl AgentAdapter for CodexAdapter {
         Ok(AgentCommand {
             program: launcher.program,
             arguments,
+            environment: Vec::new(),
             current_dir: workspace.to_owned(),
         })
+    }
+
+    fn read_draft(&self, _stdout: &[u8], output: &Path) -> Result<Vec<u8>> {
+        fs::read(output).map_err(|source| io_error(output, source))
     }
 }
 
@@ -277,56 +280,6 @@ fn codex_token_usage(line: &str) -> Option<u64> {
         .as_u64()?
         .checked_add(usage.get("output_tokens")?.as_u64()?)?;
     i64::try_from(tokens).ok().map(|_| tokens)
-}
-
-struct Launcher {
-    program: OsString,
-    prefix: Vec<OsString>,
-}
-
-impl Launcher {
-    fn command<const N: usize>(&self, arguments: [&str; N]) -> Command {
-        let mut command = Command::new(&self.program);
-        command.args(&self.prefix).args(arguments);
-        command
-    }
-
-    #[cfg(not(windows))]
-    fn find() -> Option<Self> {
-        Some(Self {
-            program: find_on_path("codex")?,
-            prefix: Vec::new(),
-        })
-    }
-
-    #[cfg(windows)]
-    fn find() -> Option<Self> {
-        if let Some(program) = find_on_path("codex.exe") {
-            return Some(Self {
-                program,
-                prefix: Vec::new(),
-            });
-        }
-        let script = find_on_path("codex.ps1")?;
-        Some(Self {
-            program: find_on_path("powershell.exe")?,
-            prefix: vec![
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-File".into(),
-                script,
-            ],
-        })
-    }
-}
-
-fn find_on_path(name: &str) -> Option<OsString> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
-        .and_then(|candidate| dunce::canonicalize(candidate).ok())
-        .map(|candidate| candidate.into_os_string())
 }
 
 fn failed(reason: &str) -> AgentPreflight {

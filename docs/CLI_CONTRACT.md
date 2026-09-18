@@ -67,12 +67,20 @@ Mutation commands accept an `idempotency_key`. Reusing a key with the same reque
 
 ```shell
 reactor workspace add <path> --id <workspace_id> [--file <policy>] [--idempotency-key <key>]
-reactor workspace prepare <workspace_id> --agent codex [--idempotency-key <key>]
+reactor workspace prepare <workspace_id> --agent <codex|qwen|claude> [--idempotency-key <key>]
 reactor workspace status <workspace_id>
 reactor workspace list
 ```
 
-Only `workspace add` accepts a raw path. The Workspace is always writable. A policy may add `writable_roots` and set `network`, `mcp`, or `hooks` to `allow` or `deny`; access defaults to `allow`. Codex preparation requires version 0.154.0 or later and records only readiness metadata.
+Only `workspace add` accepts a raw path. The Workspace is always writable. A policy may add `writable_roots` and set `network`, `mcp`, or `hooks` to `allow` or `deny`; access defaults to `allow`. Preparation records readiness metadata without credentials.
+
+| Agent | Minimum version | Platform or policy limit |
+|---|---:|---|
+| Codex | 0.154.0 | Requires a Git Workspace |
+| Qwen Code | 0.24.0 | Requires Seatbelt on macOS or Docker/Podman elsewhere; cannot enforce `hooks: deny` |
+| Claude Code | 2.1.259 | Sandbox execution is supported on macOS and Linux, not native Windows |
+
+Qwen authentication is checked by the Agent when a Run starts because its CLI has no standalone authentication-status command. Unsupported platform or policy combinations remain not ready.
 
 Repeating `workspace add` with the same ID and Canonical Path updates its policy, invalidates prior Agent readiness, and requires `workspace prepare` again.
 
@@ -91,7 +99,7 @@ reactor plan review <plan_id> [--idempotency-key <key>]
 reactor plan approve <plan_id> [--approved-by <name>] [--idempotency-key <key>]
 ```
 
-`plan create` stores reviewed input without running an Agent. Simple input defaults to Codex, inherited requirements, a 7,200 second wall-time limit, and one Attempt. `--context -` reads plain text from stdin. `plan draft` asks an Agent to produce a draft and expected requirements. Draft generation uses a read-only sandbox with Network, MCP, Hooks, and user configuration disabled. Its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules.
+`plan create` stores reviewed input without running an Agent. Simple input defaults to Codex, inherited requirements, a 7,200 second wall-time limit, and one Attempt. `--context -` reads plain text from stdin. `plan draft` asks an Agent to produce a draft and expected requirements. Draft generation uses each Agent's read-only mode with Network, MCP, Hooks, and user customization disabled where supported. Its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules.
 
 ```yaml
 workspace_id: example
@@ -110,6 +118,8 @@ limits:
 Explicit requirements may contain `writable_roots`, `network`, `mcp`, `hooks`, and `tools`. They describe the minimum expected environment and never expand the Workspace policy. Tool availability and current Workspace readiness are checked before approval.
 
 `max_wall_time_seconds` accepts 1 second through 7 days. `max_attempts` accepts 1 through 10 and bounds explicit retries across replacement Runs. Reactor does not move a terminal Run back into execution. `max_tokens` is optional. It uses usage reported by the Agent after exit and ends the Run as `LIMIT_REACHED` with reason `token_limit` when exceeded.
+
+When `provider` is omitted, Reactor assigns `openai`, `qwen`, or `anthropic` from the selected Agent. This makes the Provider concurrency limit apply to every new Plan. An explicit Provider value overrides that group.
 
 ## Schedules and queue
 
@@ -138,7 +148,7 @@ Rule types are `immediate`, `manual`, `at`, `daily`, `weekdays`, `weekly`, and `
 
 Local-time rules use the current user time zone captured when the schedule is created. Reactor stores its IANA name when available and otherwise stores the current UTC offset. A DST gap moves to the next valid local time; a repeated local time selects its first occurrence. Reactor retains one pending future occurrence. A due occurrence past its deadline becomes `MISSED`, then a calendar rule advances directly to its next future occurrence.
 
-`after_quota_reset: true` delays an occurrence until the selected Agent and Provider report a reset time. Schedule creation fails when that information is unavailable; the current Codex adapter does not expose this Gate.
+`after_quota_reset: true` delays an occurrence until the selected Agent and Provider report a reset time. Schedule creation fails when that information is unavailable. The current adapters do not expose this Gate.
 
 `queue list` refreshes due occurrences and reports each queued Run with `eligible`, `dispatch_order`, and `blocked_by`. A Run that remains queued past its start deadline becomes `MISSED`. Dispatch uses Workspace FIFO, Workspace round-robin, one active Run per Workspace, and the configured global, Agent, Provider, and local endpoint limits.
 

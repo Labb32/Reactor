@@ -150,6 +150,12 @@ pub struct PlanApproval {
 
 pub fn prepare_input(mut input: PlanInput, workspace: &WorkspaceRecord) -> Result<PlanInput> {
     validate_input(&input)?;
+    input.provider = Some(
+        input
+            .agent
+            .adapter()
+            .provider_group(input.provider.as_deref()),
+    );
     input.requirements = normalize_requirements(&input.requirements, workspace)?;
     Ok(input)
 }
