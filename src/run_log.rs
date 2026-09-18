@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     ffi::OsString,
     fs::{self, File},
     io::{self, Read, Write},
@@ -11,14 +12,13 @@ use crate::permissions;
 
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_LOG_FILES: usize = 5;
-const TAIL_BYTES: usize = 64 * 1024;
+const CAPTURE_TAIL_BYTES: usize = 1024 * 1024;
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 pub struct RunLog {
     path: PathBuf,
     file: Option<File>,
     size: u64,
-    tail: Vec<u8>,
 }
 
 pub type SharedRunLog = Arc<Mutex<RunLog>>;
@@ -34,15 +34,7 @@ impl RunLog {
             path: path.to_owned(),
             file: Some(file),
             size: 0,
-            tail: Vec::new(),
         })))
-    }
-
-    pub fn tail(log: &SharedRunLog) -> io::Result<String> {
-        let log = log
-            .lock()
-            .map_err(|_| io::Error::other("log writer lock was poisoned"))?;
-        Ok(String::from_utf8_lossy(&log.tail).into_owned())
     }
 
     pub fn flush(log: &SharedRunLog) -> io::Result<()> {
@@ -64,10 +56,6 @@ impl RunLog {
             .ok_or_else(|| io::Error::other("log file is unavailable"))?
             .write_all(bytes)?;
         self.size += bytes.len() as u64;
-        self.tail.extend_from_slice(bytes);
-        if self.tail.len() > TAIL_BYTES {
-            self.tail.drain(..self.tail.len() - TAIL_BYTES);
-        }
         Ok(())
     }
 
@@ -93,16 +81,21 @@ impl RunLog {
     }
 }
 
-pub fn capture(mut reader: impl Read, log: SharedRunLog) -> io::Result<()> {
+pub fn capture(mut reader: impl Read, log: SharedRunLog) -> io::Result<Vec<u8>> {
     let mut buffer = [0_u8; 8 * 1024];
     let mut write_error = None;
+    let mut tail = VecDeque::new();
     loop {
         let count = reader.read(&mut buffer)?;
         if count == 0 {
             return match write_error {
                 Some(error) => Err(error),
-                None => Ok(()),
+                None => Ok(tail.into()),
             };
+        }
+        tail.extend(&buffer[..count]);
+        if tail.len() > CAPTURE_TAIL_BYTES {
+            tail.drain(..tail.len() - CAPTURE_TAIL_BYTES);
         }
         if write_error.is_none()
             && let Err(error) = log

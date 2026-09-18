@@ -2,7 +2,10 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -13,12 +16,16 @@ use crate::{
     checkpoint,
     domain::{PlanStatus, RunState},
     error::{ReactorError, Result, io_error},
+    interrupt,
     paths::ReactorPaths,
     plan::{PlanVersionRecord, validate_requirements, validate_tools},
     process_supervisor::ProcessSupervisor,
     run::{BeginAttempt, ExecutionRun, RunRecord},
     run_log::{self, RunLog},
-    workspace::{WorkspacePolicy, canonicalize, fingerprint},
+    workspace::{
+        CanonicalWorkspace, WorkspacePolicy, canonicalize, fingerprint, normalize_policy,
+        paths_equal, validate_storage_isolation,
+    },
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -26,8 +33,9 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const STOP_GRACE_PERIOD: Duration = Duration::from_secs(3);
 
 pub fn execute_next(paths: &ReactorPaths, app: &mut App) -> Result<Option<RunRecord>> {
+    let shutdown = interrupt::install("run interrupt handler")?;
     prepare_execution(paths, app)?;
-    execute_available(paths, app)
+    execute_available(paths, app, Some(&shutdown))
 }
 
 pub(crate) fn prepare_execution(paths: &ReactorPaths, app: &mut App) -> Result<()> {
@@ -37,7 +45,14 @@ pub(crate) fn prepare_execution(paths: &ReactorPaths, app: &mut App) -> Result<(
     Ok(())
 }
 
-pub(crate) fn execute_available(paths: &ReactorPaths, app: &mut App) -> Result<Option<RunRecord>> {
+pub(crate) fn execute_available(
+    paths: &ReactorPaths,
+    app: &mut App,
+    shutdown: Option<&AtomicBool>,
+) -> Result<Option<RunRecord>> {
+    if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
+        return Ok(None);
+    }
     let owner_id = crate::ids::new_id();
     let Some(claimed) = app
         .store
@@ -46,7 +61,7 @@ pub(crate) fn execute_available(paths: &ReactorPaths, app: &mut App) -> Result<O
         return Ok(None);
     };
     let _heartbeat = Heartbeat::start(paths, &claimed.id, &owner_id);
-    execute_claimed(paths, app, &claimed.id, &owner_id).map(Some)
+    execute_claimed(paths, app, &claimed.id, &owner_id, shutdown).map(Some)
 }
 
 fn execute_claimed(
@@ -54,12 +69,26 @@ fn execute_claimed(
     app: &mut App,
     run_id: &str,
     owner_id: &str,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<RunRecord> {
     let execution = app.store.execution_run(run_id)?;
     let workspace = app.store.get_workspace(&execution.record.workspace_id)?;
-    let roots = execution
-        .policy
-        .write_paths(Path::new(&workspace.canonical_path));
+    let runtime = match runtime_workspace(paths, &workspace, &execution.policy) {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            let run = app.store.finish_run(
+                run_id,
+                None,
+                RunState::Preparing,
+                RunState::ReviewRequired,
+                None,
+                "workspace_policy_changed",
+            )?;
+            app.store.release_run(run_id, owner_id)?;
+            return Ok(run);
+        }
+    };
+    let roots = runtime.policy.write_paths(&runtime.canonical.path);
     if checkpoint::begin(paths, run_id, &execution.record.workspace_id, &roots).is_err() {
         let run = app.store.finish_run(
             run_id,
@@ -72,7 +101,7 @@ fn execute_claimed(
         app.store.release_run(run_id, owner_id)?;
         return Ok(run);
     }
-    let run = execute_prepared(paths, app, execution, workspace)?;
+    let run = execute_prepared(paths, app, execution, workspace, shutdown)?;
     record_checkpoint_result(paths, app, &run)
 }
 
@@ -81,8 +110,19 @@ fn execute_prepared(
     app: &mut App,
     execution: ExecutionRun,
     workspace: crate::workspace::WorkspaceRecord,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<RunRecord> {
     let run_id = &execution.record.id;
+    if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
+        return app.store.finish_run(
+            run_id,
+            None,
+            RunState::Preparing,
+            RunState::ReviewRequired,
+            None,
+            "runner_interrupted",
+        );
+    }
     if execution.record.cancel_requested_at.is_some() {
         return app.store.finish_run(
             run_id,
@@ -98,6 +138,7 @@ fn execute_prepared(
         Some(execution.record.plan_version),
     )?;
     let prepared = match prepare(
+        paths,
         &execution.record,
         &execution.policy,
         &plan.version,
@@ -251,6 +292,7 @@ fn execute_prepared(
         prepared.timeout,
         started,
         &log_path,
+        shutdown,
     ) {
         Ok(outcome) => outcome,
         Err(_) => {
@@ -271,12 +313,13 @@ fn execute_prepared(
         }
     };
     let stdin_result = join_input(stdin_thread);
-    let capture_result = finish_capture(stdout_thread, stderr_thread);
+    let captured = finish_capture(stdout_thread, stderr_thread);
     let flush_result = RunLog::flush(&log);
-    let output = RunLog::tail(&log);
-    let log_failed = capture_result.is_err() || flush_result.is_err() || output.is_err();
-    let output = output.unwrap_or_default();
-    let token_usage = prepared.agent.adapter().token_usage(&output);
+    let log_failed = captured.is_err() || flush_result.is_err();
+    let (stdout, stderr) = captured.unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
+    let token_usage = prepared.agent.adapter().token_usage(&stdout);
     if let Some(tokens) = token_usage {
         app.store
             .record_attempt_usage(run_id, &attempt.id, tokens)?;
@@ -285,11 +328,13 @@ fn execute_prepared(
     let (next, reason) = match outcome.reason {
         StopReason::Cancelled => (RunState::Cancelled, "cancel_requested"),
         StopReason::TimedOut => (RunState::LimitReached, "wall_time_limit"),
+        StopReason::Shutdown => (RunState::ReviewRequired, "runner_interrupted"),
         StopReason::Exited if log_failed => (RunState::Failed, "log_io_error"),
         StopReason::Exited if stdin_result.is_err() => (RunState::Failed, "input_failed"),
         StopReason::Exited
             if !outcome.status.success()
-                && prepared.agent.adapter().failure_requires_review(&output) =>
+                && (prepared.agent.adapter().failure_requires_review(&stdout)
+                    || prepared.agent.adapter().failure_requires_review(&stderr)) =>
         {
             (RunState::ReviewRequired, "sandbox_denied")
         }
@@ -450,6 +495,7 @@ enum Preparation {
 }
 
 fn prepare(
+    paths: &ReactorPaths,
     run: &RunRecord,
     policy: &WorkspacePolicy,
     plan: &PlanVersionRecord,
@@ -489,14 +535,16 @@ fn prepare(
             "workspace_not_ready".to_owned(),
         ));
     }
-    let canonical = match canonicalize(Path::new(&workspace.canonical_path)) {
-        Ok(canonical) => canonical,
+    let runtime = match runtime_workspace(paths, workspace, policy) {
+        Ok(runtime) => runtime,
         Err(_) => {
             return Ok(Preparation::ReviewRequired(
-                "workspace_unavailable".to_owned(),
+                "workspace_policy_changed".to_owned(),
             ));
         }
     };
+    let canonical = runtime.canonical;
+    let policy = &runtime.policy;
     let current_fingerprint = match fingerprint(&canonical, policy, agent.adapter().policy_files())
     {
         Ok(fingerprint) => fingerprint,
@@ -550,6 +598,39 @@ fn prepare(
     }))
 }
 
+struct RuntimeWorkspace {
+    canonical: CanonicalWorkspace,
+    policy: WorkspacePolicy,
+}
+
+fn runtime_workspace(
+    paths: &ReactorPaths,
+    workspace: &crate::workspace::WorkspaceRecord,
+    policy: &WorkspacePolicy,
+) -> Result<RuntimeWorkspace> {
+    let canonical = canonicalize(Path::new(&workspace.canonical_path))?;
+    if !paths_equal(&canonical.display, &workspace.canonical_path) {
+        return Err(ReactorError::InvalidSandboxPolicy(
+            "workspace path changed".to_owned(),
+        ));
+    }
+    let normalized = normalize_policy(&canonical, policy)?;
+    let stored = serde_json::to_vec(policy)
+        .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
+    let current = serde_json::to_vec(&normalized)
+        .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
+    if current != stored {
+        return Err(ReactorError::InvalidSandboxPolicy(
+            "workspace write scope changed".to_owned(),
+        ));
+    }
+    validate_storage_isolation(&canonical, &normalized, paths)?;
+    Ok(RuntimeWorkspace {
+        canonical,
+        policy: normalized,
+    })
+}
+
 fn process_command(agent: &AgentCommand) -> Command {
     let mut command = Command::new(&agent.program);
     command
@@ -571,6 +652,7 @@ enum StopReason {
     Exited,
     Cancelled,
     TimedOut,
+    Shutdown,
 }
 
 fn monitor(
@@ -580,8 +662,18 @@ fn monitor(
     timeout: Duration,
     started: Instant,
     log_path: &Path,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<ProcessOutcome> {
     loop {
+        if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
+            let status = supervisor
+                .stop(STOP_GRACE_PERIOD)
+                .map_err(|source| io_error(log_path, source))?;
+            return Ok(ProcessOutcome {
+                status,
+                reason: StopReason::Shutdown,
+            });
+        }
         if app.store.cancellation_requested(run_id)? {
             let status = supervisor
                 .stop(STOP_GRACE_PERIOD)
@@ -615,15 +707,15 @@ fn monitor(
 }
 
 fn finish_capture(
-    stdout: thread::JoinHandle<std::io::Result<()>>,
-    stderr: thread::JoinHandle<std::io::Result<()>>,
-) -> std::io::Result<()> {
+    stdout: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stderr: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
     let stdout = join_capture(stdout);
     let stderr = join_capture(stderr);
-    stdout.and(stderr)
+    Ok((stdout?, stderr?))
 }
 
-fn join_capture(handle: thread::JoinHandle<std::io::Result<()>>) -> std::io::Result<()> {
+fn join_capture(handle: thread::JoinHandle<std::io::Result<Vec<u8>>>) -> std::io::Result<Vec<u8>> {
     handle
         .join()
         .map_err(|_| std::io::Error::other("log capture thread panicked"))?

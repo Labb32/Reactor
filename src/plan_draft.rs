@@ -4,12 +4,13 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
     agents::AgentKind,
     error::{ReactorError, Result, io_error},
+    interrupt,
     paths::ReactorPaths,
     plan::AgentPlanDraft,
     process_supervisor::ProcessSupervisor,
@@ -82,6 +83,7 @@ fn generate_inner(
     schema_path: &std::path::Path,
     output_path: &std::path::Path,
 ) -> Result<AgentPlanDraft> {
+    let interrupted = interrupt::install("plan draft interrupt handler")?;
     let command = agent.adapter().draft_command(
         std::path::Path::new(&workspace.canonical_path),
         schema_path,
@@ -128,13 +130,22 @@ fn generate_inner(
         let _ = stdin_sender.send(result);
     });
 
-    let timeout = Duration::from_secs(timeout_seconds);
-    let status = match supervisor
-        .wait_for(timeout)
-        .map_err(|source| io_error(&command.current_dir, source))?
-    {
-        Some(status) => status,
-        None => {
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let status = loop {
+        if interrupted.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(source) = supervisor.stop(STOP_GRACE_PERIOD) {
+                return Err(ReactorError::AgentUnavailable {
+                    agent: agent.as_str().to_owned(),
+                    reason: format!("plan draft interrupted; cleanup failed: {source}"),
+                });
+            }
+            return Err(ReactorError::AgentUnavailable {
+                agent: agent.as_str().to_owned(),
+                reason: "plan draft interrupted".to_owned(),
+            });
+        }
+        let now = Instant::now();
+        if now >= deadline {
             if let Err(source) = supervisor.stop(STOP_GRACE_PERIOD) {
                 return Err(ReactorError::AgentUnavailable {
                     agent: agent.as_str().to_owned(),
@@ -145,6 +156,13 @@ fn generate_inner(
                 agent: agent.as_str().to_owned(),
                 reason: "plan draft timed out".to_owned(),
             });
+        }
+        let wait = Duration::from_millis(100).min(deadline - now);
+        if let Some(status) = supervisor
+            .wait_for(wait)
+            .map_err(|source| io_error(&command.current_dir, source))?
+        {
+            break status;
         }
     };
     let stdin_result = stdin_receiver.recv_timeout(Duration::from_secs(2));

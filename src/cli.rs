@@ -284,7 +284,7 @@ pub fn run() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if output::write_error(cli.output, None, &error).is_err() {
-                eprintln!("reactor: {error}");
+                eprintln!("reactor: {}", output::escape_control(&error.to_string()));
             }
             ExitCode::from(error.exit_code())
         }

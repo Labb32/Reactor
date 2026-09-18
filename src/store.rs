@@ -256,6 +256,7 @@ impl Store {
         operation: impl FnOnce(&Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
         self.ensure_supported_schema()?;
+        validate_idempotency_key(key)?;
         let request_hash = blake3::hash(request).to_hex().to_string();
         let transaction = self
             .connection
@@ -295,6 +296,7 @@ impl Store {
         request: &[u8],
     ) -> Result<Option<T>> {
         self.ensure_supported_schema()?;
+        validate_idempotency_key(key)?;
         let request_hash = blake3::hash(request).to_hex().to_string();
         let existing: Option<(String, String)> = self
             .connection
@@ -423,6 +425,15 @@ fn reject_newer_schema(found: u32) -> Result<()> {
             found,
             supported: SUPPORTED_SCHEMA_VERSION,
         });
+    }
+    Ok(())
+}
+
+fn validate_idempotency_key(key: &str) -> Result<()> {
+    if key.is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
+        return Err(ReactorError::InvalidArgument(
+            "idempotency key must contain 1 to 128 bytes without control characters".to_owned(),
+        ));
     }
     Ok(())
 }

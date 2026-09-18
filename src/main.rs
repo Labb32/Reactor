@@ -8,6 +8,7 @@ mod domain;
 mod error;
 mod ids;
 mod input;
+mod interrupt;
 mod output;
 mod paths;
 mod permissions;

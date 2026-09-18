@@ -78,6 +78,6 @@ pub fn write_error(
         });
     }
 
-    eprintln!("reactor: {error}");
+    eprintln!("reactor: {}", escape_control(&error.to_string()));
     Ok(())
 }

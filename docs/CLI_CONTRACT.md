@@ -62,6 +62,7 @@ The daemon uses an OS file lock to reject duplicate instances and runs up to the
 Commands that accept a document use `--file <path>` or `--file -` for stdin. `.json`, `.yaml`, and `.yml` are recognized; stdin and unknown extensions try JSON followed by YAML.
 
 Mutation commands accept an `idempotency_key`. Reusing a key with the same request returns the stored response. Reusing it with different input returns `idempotency_conflict`.
+Keys contain 1 to 128 bytes without control characters.
 
 ## Workspaces
 
@@ -73,6 +74,7 @@ reactor workspace list
 ```
 
 Only `workspace add` accepts a raw path. The Workspace is always writable. A policy may add `writable_roots` and set `network`, `mcp`, or `hooks` to `allow` or `deny`; access defaults to `allow`. Preparation records readiness metadata without credentials.
+Workspace write scopes must not overlap Reactor's configuration or data directories.
 
 | Agent | Minimum version | Platform or policy limit |
 |---|---:|---|

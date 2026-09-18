@@ -2,7 +2,7 @@
 
 **검토한 AI 에이전트 작업을 원하는 시점에 실행하는 크로스 플랫폼 CLI 스케줄러**
 
-> 현재 상태: 초기 구현
+> 현재 상태: v0.1 출시 후보
 
 ```text
 Workspace 등록 → 작업 검토·승인 → 예약 → Agent 실행 → 결과·Diff 확인
@@ -39,7 +39,7 @@ reactor run result <run-id>
 
 모든 작업은 준비된 Workspace에서 실행합니다. 승인된 Plan Version은 수정하지 않으며, 변경하면 새 Version으로 다시 검토합니다.
 
-예약 작업은 실행 중 사용자 승인을 기다리지 않습니다. Workspace 정책 안에서 Agent의 sandbox 또는 Full Access 모드를 사용하고, 필요한 권한이 없으면 실패 사유를 기록합니다.
+예약 작업은 실행 중 사용자 승인을 기다리지 않습니다. Workspace 정책을 Agent의 sandbox 설정으로 적용하고, 필요한 권한이 없으면 실패 사유를 기록합니다.
 
 ## 실행 정책
 
@@ -59,7 +59,7 @@ concurrency:
 
 ## 구조
 
-Reactor는 Rust 단일 Binary와 SQLite로 구성합니다. CLI와 daemon이 같은 DB를 사용하며, SQLite Transaction으로 Queue 선점과 상태 전이를 처리합니다.
+Reactor는 Rust 1.88 이상의 단일 Binary와 SQLite로 구성합니다. CLI와 daemon이 같은 DB를 사용하며, SQLite Transaction으로 Queue 선점과 상태 전이를 처리합니다.
 
 ```text
 CLI ───────→ SQLite ←────── Daemon → Agent CLI → Workspace

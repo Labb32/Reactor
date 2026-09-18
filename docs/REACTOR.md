@@ -145,13 +145,13 @@ reactor init
 reactor service install|start|stop|status|uninstall
 reactor workspace add|prepare|status|list
 reactor plan create|draft|show|revise|review|approve
-reactor schedule add|pause|resume
-reactor run start|list|show|progress|diff|result|retry|cancel
-reactor queue show
-reactor audit list
+reactor schedule add|show|list|pause|resume|trigger
+reactor run next|show|progress|result|diff|list|cancel|retry
+reactor queue list
+reactor events --after <cursor> [--follow]
 ```
 
-모든 명령은 `--file <yaml|json>`, `--file -`, `--output json`을 지원한다. Mutation은 `idempotency_key`로 중복을 막는다.
+문서 입력 명령은 `--file <yaml|json>` 또는 `--file -`를 지원한다. 기계 출력은 `--output json` 또는 `jsonl`을 사용하며 Mutation은 `idempotency_key`로 중복을 막는다.
 
 ## 외부 서비스 연동 경계
 
@@ -180,6 +180,7 @@ reactor events --after <cursor> --follow --output jsonl
 3. Context Plan 검토·승인과 단일 예약
 4. Queue, 프로세스 감시와 상태 조회
 5. Checkpoint, Diff와 중단 복구
-6. 반복 예약, 한도와 나머지 Agent
+6. 반복 예약, 한도와 daemon 자동 시작
+7. Qwen Code와 Claude Adapter
 
 자세한 구현 기준은 [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md)와 [SANDBOX.md](SANDBOX.md)를 따른다.

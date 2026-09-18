@@ -5,19 +5,6 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
     restrict_dir(path)
 }
 
-pub fn create_private_file(path: &Path) -> io::Result<fs::File> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    restrict_file(path)?;
-    Ok(file)
-}
-
 pub fn create_private_new_file(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);

@@ -6,7 +6,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ReactorError, Result, io_error};
+use crate::{
+    error::{ReactorError, Result, io_error},
+    paths::ReactorPaths,
+};
 
 const MAX_POLICY_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -220,6 +223,44 @@ pub fn fingerprint(
 pub fn paths_overlap(left: &str, right: &str) -> bool {
     let left = Path::new(left);
     let right = Path::new(right);
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+pub fn paths_equal(left: &str, right: &str) -> bool {
+    path_key(left) == path_key(right)
+}
+
+pub fn validate_storage_isolation(
+    workspace: &CanonicalWorkspace,
+    policy: &WorkspacePolicy,
+    paths: &ReactorPaths,
+) -> Result<()> {
+    let write_paths = policy.write_paths(&workspace.path);
+    for reserved in [&paths.config_dir, &paths.data_dir] {
+        let reserved =
+            dunce::canonicalize(reserved).map_err(|source| io_error(reserved, source))?;
+        if write_paths
+            .iter()
+            .any(|write_path| path_overlap(write_path, &reserved))
+        {
+            return Err(ReactorError::InvalidSandboxPolicy(format!(
+                "workspace write scope overlaps Reactor storage: {}",
+                reserved.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn path_overlap(left: &Path, right: &Path) -> bool {
+    let left = left.to_string_lossy().to_lowercase();
+    let right = right.to_string_lossy().to_lowercase();
+    paths_overlap(&left, &right)
+}
+
+#[cfg(not(windows))]
+fn path_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 

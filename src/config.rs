@@ -84,35 +84,68 @@ fn write_config(path: &Path, config: &Config) -> Result<()> {
         .ok_or_else(|| io_error(path, std::io::Error::other("missing parent directory")))?;
     fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
 
-    let temporary = path.with_extension("json.tmp");
-    let mut file = crate::permissions::create_private_file(&temporary)
-        .map_err(|source| io_error(&temporary, source))?;
-    serde_json::to_writer_pretty(&mut file, config).map_err(|source| {
-        ReactorError::InvalidConfig {
-            path: temporary.clone(),
+    let temporary = parent.join(format!(".config.{}.tmp", crate::ids::new_id()));
+    let mut contents =
+        serde_json::to_vec_pretty(config).map_err(|source| ReactorError::InvalidConfig {
+            path: path.to_owned(),
             source,
+        })?;
+    contents.push(b'\n');
+    let mut file = crate::permissions::create_private_new_file(&temporary)
+        .map_err(|source| io_error(&temporary, source))?;
+    if let Err(source) = file.write_all(&contents).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(io_error(&temporary, source));
+    }
+    drop(file);
+    let result = replace_config(path, &temporary);
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn replace_config(path: &Path, temporary: &Path) -> Result<()> {
+    platform::replace(temporary, path).map_err(|source| io_error(path, source))
+}
+
+#[cfg(not(windows))]
+mod platform {
+    use std::{fs, io, path::Path};
+
+    pub fn replace(temporary: &Path, target: &Path) -> io::Result<()> {
+        fs::rename(temporary, target)
+    }
+}
+
+#[cfg(windows)]
+mod platform {
+    use std::{io, os::windows::ffi::OsStrExt, path::Path};
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    pub fn replace(temporary: &Path, target: &Path) -> io::Result<()> {
+        let temporary = wide(temporary);
+        let target = wide(target);
+        // SAFETY: Both null-terminated buffers remain valid for the call.
+        if unsafe {
+            MoveFileExW(
+                temporary.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
         }
-    })?;
-    file.write_all(b"\n")
-        .map_err(|source| io_error(&temporary, source))?;
-    file.sync_all()
-        .map_err(|source| io_error(&temporary, source))?;
-    if !path.exists() {
-        fs::rename(&temporary, path).map_err(|source| io_error(path, source))?;
-        return Ok(());
     }
 
-    // Preserve the previous file because Windows rename does not replace it.
-    let backup = path.with_extension("json.bak");
-    if backup.exists() {
-        fs::remove_file(&backup).map_err(|source| io_error(&backup, source))?;
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
     }
-    fs::rename(path, &backup).map_err(|source| io_error(path, source))?;
-    if let Err(source) = fs::rename(&temporary, path) {
-        let _ = fs::rename(&backup, path);
-        return Err(io_error(path, source));
-    }
-    fs::remove_file(&backup).map_err(|source| io_error(&backup, source))?;
-
-    Ok(())
 }

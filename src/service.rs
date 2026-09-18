@@ -110,20 +110,23 @@ fn write_service_file(path: &Path, contents: &str) -> Result<()> {
         .parent()
         .ok_or_else(|| service_error("install", "service file has no parent directory"))?;
     permissions::create_private_dir(parent).map_err(|source| io_error(parent, source))?;
-    let temporary = path.with_extension("tmp");
-    if temporary.exists() {
-        fs::remove_file(&temporary).map_err(|source| io_error(&temporary, source))?;
-    }
+    let temporary = parent.join(format!(".service.{}.tmp", crate::ids::new_id()));
     let mut file = permissions::create_private_new_file(&temporary)
         .map_err(|source| io_error(&temporary, source))?;
-    file.write_all(contents.as_bytes())
-        .map_err(|source| io_error(&temporary, source))?;
-    file.sync_all()
-        .map_err(|source| io_error(&temporary, source))?;
-    if path.exists() {
-        fs::remove_file(path).map_err(|source| io_error(path, source))?;
+    if let Err(source) = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(io_error(&temporary, source));
     }
-    fs::rename(&temporary, path).map_err(|source| io_error(path, source))
+    drop(file);
+    if let Err(source) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(io_error(path, source));
+    }
+    Ok(())
 }
 
 fn run_checked(operation: &'static str, command: &mut Command) -> Result<()> {

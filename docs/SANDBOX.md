@@ -6,6 +6,7 @@ Reactor는 Workspace의 허용 범위를 관리하고 Agent의 sandbox 기능으
 
 - Workspace와 추가 쓰기 경로를 Canonical Path로 저장한다.
 - 경로 중첩과 다른 Workspace의 쓰기 경로 충돌을 막는다.
+- 실행 직전에 쓰기 경로를 다시 정규화하고 Reactor 저장 경로와의 중첩을 거절한다.
 - Plan이 Workspace 정책보다 넓은 권한을 요청하지 못하게 한다.
 - Agent가 필요한 정책을 지원하는지 실행 전에 확인한다.
 - Workspace 정책을 Agent별 실행 옵션으로 변환한다.

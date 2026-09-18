@@ -179,7 +179,7 @@ fn draft(format: OutputFormat, arguments: &PlanDraftArgs) -> Result<()> {
         ));
     }
     let workspace =
-        super::workspaces::require_ready(&mut app, &arguments.workspace, arguments.agent)?;
+        super::workspaces::require_ready(&paths, &mut app, &arguments.workspace, arguments.agent)?;
 
     let draft = plan_draft::generate(
         &paths,
@@ -339,6 +339,7 @@ fn approve(format: OutputFormat, arguments: &PlanApproveArgs) -> Result<()> {
     let mut app = App::open(&paths)?;
     let current = app.store.get_plan(&arguments.plan_id, None)?;
     super::workspaces::require_ready(
+        &paths,
         &mut app,
         &current.version.workspace_id,
         current.version.agent,

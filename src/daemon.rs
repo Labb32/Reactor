@@ -3,7 +3,10 @@ use std::{
     io::{Seek, SeekFrom, Write},
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
@@ -11,6 +14,7 @@ use std::{
 use crate::{
     app::App,
     error::{ReactorError, Result, io_error},
+    interrupt,
     paths::ReactorPaths,
     permissions, runner,
 };
@@ -20,50 +24,75 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub fn run(paths: ReactorPaths) -> Result<()> {
     let _lock = DaemonLock::acquire(&paths)?;
     App::initialize(paths.clone(), None)?;
+    let shutdown = interrupt::install("daemon shutdown handler")?;
     let mut app = App::open(&paths)?;
     runner::prepare_execution(&paths, &mut app)?;
     let worker_count = usize::from(app.config.concurrency.global);
     drop(app);
 
     let (sender, receiver) = mpsc::channel();
+    let mut spawned = 0_usize;
     for _ in 0..worker_count {
         let sender = sender.clone();
         let paths = paths.clone();
-        thread::Builder::new()
+        let worker_shutdown = shutdown.clone();
+        let result = thread::Builder::new()
             .name("reactor-worker".to_owned())
             .spawn(move || {
-                let outcome = catch_unwind(AssertUnwindSafe(|| worker(&paths)));
-                let error = match outcome {
-                    Ok(Err(error)) => error,
-                    Ok(Ok(())) => ReactorError::InvalidStoredData(
-                        "daemon worker stopped unexpectedly".to_owned(),
-                    ),
-                    Err(_) => ReactorError::InvalidStoredData("daemon worker panicked".to_owned()),
-                };
-                let _ = sender.send(error);
-            })
-            .map_err(|source| io_error("daemon worker", source))?;
+                let outcome =
+                    match catch_unwind(AssertUnwindSafe(|| worker(&paths, &worker_shutdown))) {
+                        Ok(result) => result,
+                        Err(_) => Err(ReactorError::InvalidStoredData(
+                            "daemon worker panicked".to_owned(),
+                        )),
+                    };
+                let _ = sender.send(outcome);
+            });
+        match result {
+            Ok(_) => spawned += 1,
+            Err(source) => {
+                shutdown.store(true, Ordering::Release);
+                for _ in 0..spawned {
+                    let _ = receiver.recv();
+                }
+                return Err(io_error("daemon worker", source));
+            }
+        }
     }
     drop(sender);
-    match receiver.recv() {
-        Ok(error) => Err(error),
-        Err(_) => Err(ReactorError::InvalidStoredData(
-            "all daemon workers stopped unexpectedly".to_owned(),
-        )),
+    let mut failure = None;
+    for _ in 0..spawned {
+        match receiver.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                shutdown.store(true, Ordering::Release);
+                failure.get_or_insert(error);
+            }
+            Err(_) => {
+                shutdown.store(true, Ordering::Release);
+                failure.get_or_insert_with(|| {
+                    ReactorError::InvalidStoredData(
+                        "daemon worker result channel closed".to_owned(),
+                    )
+                });
+            }
+        }
     }
+    failure.map_or(Ok(()), Err)
 }
 
 pub fn is_running(paths: &ReactorPaths) -> Result<bool> {
     Ok(DaemonLock::try_acquire(paths, false)?.is_none())
 }
 
-fn worker(paths: &ReactorPaths) -> Result<()> {
+fn worker(paths: &ReactorPaths, shutdown: &AtomicBool) -> Result<()> {
     let mut app = App::open(paths)?;
-    loop {
-        if runner::execute_available(paths, &mut app)?.is_none() {
+    while !shutdown.load(Ordering::Acquire) {
+        if runner::execute_available(paths, &mut app, Some(shutdown))?.is_none() {
             thread::sleep(IDLE_POLL_INTERVAL);
         }
     }
+    Ok(())
 }
 
 struct DaemonLock {

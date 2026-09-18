@@ -9,7 +9,7 @@ use crate::{
     paths::ReactorPaths,
     workspace::{
         CanonicalWorkspace, WorkspacePolicy, WorkspaceRecord, canonicalize, fingerprint,
-        normalize_policy, validate_id,
+        normalize_policy, validate_id, validate_storage_isolation,
     },
 };
 
@@ -23,6 +23,7 @@ struct WorkspaceInspection {
 enum InspectionFailure {
     PathUnavailable,
     PolicyUnreadable,
+    StorageOverlap,
 }
 
 impl InspectionFailure {
@@ -30,6 +31,7 @@ impl InspectionFailure {
         match self {
             Self::PathUnavailable => "path_unavailable",
             Self::PolicyUnreadable => "policy_unreadable",
+            Self::StorageOverlap => "storage_overlap",
         }
     }
 
@@ -37,6 +39,7 @@ impl InspectionFailure {
         match self {
             Self::PathUnavailable => "workspace path is unavailable",
             Self::PolicyUnreadable => "workspace policy is unreadable",
+            Self::StorageOverlap => "workspace write scope overlaps Reactor storage",
         }
     }
 }
@@ -110,9 +113,10 @@ fn workspace_add(format: OutputFormat, arguments: &WorkspaceAddArgs) -> Result<(
         .transpose()?
         .unwrap_or_default();
     let policy = normalize_policy(&workspace, &policy)?;
-    let policy_fingerprint = fingerprint(&workspace, &policy, &[])?;
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
+    validate_storage_isolation(&workspace, &policy, &paths)?;
+    let policy_fingerprint = fingerprint(&workspace, &policy, &[])?;
     let record = app.store.register_workspace(
         &arguments.id,
         &workspace,
@@ -127,7 +131,7 @@ fn workspace_prepare(format: OutputFormat, arguments: &WorkspacePrepareArgs) -> 
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let record = app.store.get_workspace(&arguments.workspace_id)?;
-    let inspection = match inspect_workspace(&record) {
+    let inspection = match inspect_workspace(&paths, &record) {
         Ok(inspection) => inspection,
         Err(failure) => {
             let record = app
@@ -187,7 +191,7 @@ fn workspace_status(format: OutputFormat, arguments: &WorkspaceIdArgs) -> Result
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let record = app.store.get_workspace(&arguments.workspace_id)?;
-    let inspection = match inspect_workspace(&record) {
+    let inspection = match inspect_workspace(&paths, &record) {
         Ok(inspection) => inspection,
         Err(failure) => {
             let record = app
@@ -257,12 +261,13 @@ fn workspace_list(format: OutputFormat) -> Result<()> {
 }
 
 pub(super) fn require_ready(
+    paths: &ReactorPaths,
     app: &mut App,
     workspace_id: &str,
     agent: AgentKind,
 ) -> Result<WorkspaceRecord> {
     let record = app.store.get_workspace(workspace_id)?;
-    let inspection = match inspect_workspace(&record) {
+    let inspection = match inspect_workspace(paths, &record) {
         Ok(inspection) => inspection,
         Err(failure) => {
             app.store
@@ -321,12 +326,15 @@ pub(super) fn require_ready(
 }
 
 fn inspect_workspace(
+    paths: &ReactorPaths,
     record: &WorkspaceRecord,
 ) -> std::result::Result<WorkspaceInspection, InspectionFailure> {
     let workspace = canonicalize(std::path::Path::new(&record.canonical_path))
         .map_err(|_| InspectionFailure::PathUnavailable)?;
     let policy = normalize_policy(&workspace, &record.policy)
         .map_err(|_| InspectionFailure::PolicyUnreadable)?;
+    validate_storage_isolation(&workspace, &policy, paths)
+        .map_err(|_| InspectionFailure::StorageOverlap)?;
     let fingerprint =
         fingerprint(&workspace, &policy, &[]).map_err(|_| InspectionFailure::PolicyUnreadable)?;
     Ok(WorkspaceInspection {

@@ -161,6 +161,7 @@ Plan에 Provider가 없으면 Adapter의 기본 Group을 저장한다. 명시한
 - Windows: Job Object 단위 종료
 - Stdout/Stderr는 File에 계속 기록
 - 취소 요청 시 Process Tree에 종료 신호를 보내고 3초 안에 종료되지 않으면 강제 종료
+- Daemon 종료 신호도 같은 경로로 처리하고 실행 중 Run은 `REVIEW_REQUIRED`로 종료
 - PID만 믿지 않고 Lease와 Process 시작 정보를 함께 확인
 
 Daemon이 중단되면 Process에 다시 붙지 않는다. Run을 `REVIEW_REQUIRED`로 둔다.
