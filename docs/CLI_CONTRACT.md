@@ -145,7 +145,7 @@ reactor run retry <run_id> [--idempotency-key <key>]
 
 `run next` claims and executes one eligible Run. It blocks until the Agent exits, the wall-time limit is reached, or another process requests cancellation. Cancellation stops the Agent process tree, waits up to three seconds, collects the remaining output, and then records `CANCELLED`.
 
-`run retry` accepts `FAILED`, `CANCELLED`, `LIMIT_REACHED`, and `REVIEW_REQUIRED` while Attempt budget remains. It leaves the source Run unchanged and queues a new Run with the same approved Plan Version and remaining execution limits.
+`run retry` accepts `FAILED`, `CANCELLED`, `LIMIT_REACHED`, and `REVIEW_REQUIRED` while Attempt budget remains. It leaves the source Run unchanged and queues one replacement Run with the same approved Plan Version and remaining execution limits. Further retries continue from the latest replacement Run.
 
 Attempt logs are stored under Reactor's data directory, rotate at 10 MiB, retain at most five files, and expire after 30 days. Sandbox permission failures become `REVIEW_REQUIRED`; Reactor does not widen the approved policy automatically.
 

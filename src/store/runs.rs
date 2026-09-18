@@ -535,6 +535,16 @@ fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Resul
             state.as_str()
         )));
     }
+    let already_retried: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE retry_of = ?1)",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    if already_retried {
+        return Err(ReactorError::InvalidArgument(
+            "run has already been retried".to_owned(),
+        ));
+    }
     let used_attempts: u32 = transaction.query_row(
         "SELECT COUNT(*) FROM attempts WHERE run_id = ?1",
         [run_id],
@@ -552,10 +562,10 @@ fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Resul
     let now = crate::time::now_utc();
     let changed = transaction.execute(
         "INSERT INTO runs
-         (id, workspace_id, plan_id, plan_version, occurrence_id, state, agent_kind,
+         (id, workspace_id, plan_id, plan_version, occurrence_id, retry_of, state, agent_kind,
           provider, local_endpoint, policy_snapshot_json, limits_snapshot_json,
           ready_at, created_at, updated_at)
-         SELECT ?1, workspace_id, plan_id, plan_version, NULL, 'QUEUED', agent_kind,
+         SELECT ?1, workspace_id, plan_id, plan_version, NULL, ?4, 'QUEUED', agent_kind,
                 provider, local_endpoint, policy_snapshot_json, ?2,
                 ?3, ?3, ?3
          FROM runs WHERE id = ?4 AND state = ?5",
@@ -583,6 +593,7 @@ fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
         plan_id: String,
         plan_version: u32,
         occurrence_id: Option<String>,
+        retry_of: Option<String>,
         state: String,
         agent_kind: String,
         provider: Option<String>,
@@ -595,7 +606,7 @@ fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
     }
     let stored: Option<StoredRun> = connection
         .query_row(
-            "SELECT workspace_id, plan_id, plan_version, occurrence_id, state, agent_kind,
+            "SELECT workspace_id, plan_id, plan_version, occurrence_id, retry_of, state, agent_kind,
                     provider, local_endpoint, limits_snapshot_json, ready_at,
                     cancel_requested_at, created_at, updated_at
              FROM runs WHERE id = ?1",
@@ -606,15 +617,16 @@ fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
                     plan_id: row.get(1)?,
                     plan_version: row.get(2)?,
                     occurrence_id: row.get(3)?,
-                    state: row.get(4)?,
-                    agent_kind: row.get(5)?,
-                    provider: row.get(6)?,
-                    local_endpoint: row.get(7)?,
-                    limits_json: row.get(8)?,
-                    ready_at: row.get(9)?,
-                    cancel_requested_at: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
+                    retry_of: row.get(4)?,
+                    state: row.get(5)?,
+                    agent_kind: row.get(6)?,
+                    provider: row.get(7)?,
+                    local_endpoint: row.get(8)?,
+                    limits_json: row.get(9)?,
+                    ready_at: row.get(10)?,
+                    cancel_requested_at: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
                 })
             },
         )
@@ -630,6 +642,7 @@ fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
         plan_id: stored.plan_id,
         plan_version: stored.plan_version,
         occurrence_id: stored.occurrence_id,
+        retry_of: stored.retry_of,
         state: stored.state,
         agent_kind: stored.agent_kind,
         provider: stored.provider,

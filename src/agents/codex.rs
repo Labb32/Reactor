@@ -272,10 +272,11 @@ fn codex_token_usage(line: &str) -> Option<u64> {
         return None;
     }
     let usage = event.get("usage")?;
-    usage
+    let tokens = usage
         .get("input_tokens")?
         .as_u64()?
-        .checked_add(usage.get("output_tokens")?.as_u64()?)
+        .checked_add(usage.get("output_tokens")?.as_u64()?)?;
+    i64::try_from(tokens).ok().map(|_| tokens)
 }
 
 struct Launcher {

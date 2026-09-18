@@ -136,15 +136,13 @@ fn insert_schedule(
         "INSERT INTO schedules
          (id, plan_id, plan_version, status, rule_json, timezone, start_at, start_deadline,
           gate_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'ACTIVE', ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+         VALUES (?1, ?2, ?3, 'ACTIVE', ?4, ?5, NULL, NULL, ?6, ?7, ?7)",
         params![
             id,
             input.plan_id,
             plan.version.version,
             rule_json,
             prepared.timezone,
-            prepared.scheduled_at,
-            prepared.deadline_at,
             gate_json,
             now_text
         ],
@@ -177,12 +175,9 @@ fn insert_schedule(
         | ScheduleRule::Daily { .. }
         | ScheduleRule::Weekdays { .. }
         | ScheduleRule::Weekly { .. } => {
-            let scheduled_at = prepared.scheduled_at.as_deref().ok_or_else(|| {
+            let mut scheduled = prepared.scheduled_at.ok_or_else(|| {
                 ReactorError::InvalidSchedule("scheduled time is missing".to_owned())
             })?;
-            let mut scheduled = scheduled_at
-                .parse::<jiff::Timestamp>()
-                .map_err(|error| ReactorError::InvalidSchedule(error.to_string()))?;
             if let Some(reset) = quota_reset {
                 scheduled = scheduled.max(reset);
             }

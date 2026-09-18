@@ -12,6 +12,7 @@ pub struct AttemptRecord {
     pub ended_at: Option<String>,
     pub exit_code: Option<i32>,
     pub termination_reason: Option<String>,
+    #[serde(default)]
     pub token_usage: Option<u64>,
     pub log_path: String,
 }
@@ -23,6 +24,8 @@ pub struct RunRecord {
     pub plan_id: String,
     pub plan_version: u32,
     pub occurrence_id: Option<String>,
+    #[serde(default)]
+    pub retry_of: Option<String>,
     pub state: String,
     pub agent_kind: String,
     pub provider: Option<String>,

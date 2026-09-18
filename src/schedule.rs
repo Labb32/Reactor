@@ -11,11 +11,49 @@ const MAX_INTERVAL_SECONDS: u64 = 365 * 24 * 60 * 60;
 pub enum ScheduleRule {
     Immediate,
     Manual,
-    At { local_time: String },
-    Daily { local_time: String },
-    Weekdays { local_time: String },
-    Weekly { weekday: String, local_time: String },
-    IntervalAfterSuccess { seconds: u64 },
+    At {
+        local_time: String,
+    },
+    Daily {
+        local_time: String,
+    },
+    Weekdays {
+        local_time: String,
+    },
+    Weekly {
+        weekday: ScheduleWeekday,
+        local_time: String,
+    },
+    IntervalAfterSuccess {
+        seconds: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleWeekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl ScheduleWeekday {
+    const fn to_jiff(self) -> jiff::civil::Weekday {
+        use jiff::civil::Weekday;
+        match self {
+            Self::Monday => Weekday::Monday,
+            Self::Tuesday => Weekday::Tuesday,
+            Self::Wednesday => Weekday::Wednesday,
+            Self::Thursday => Weekday::Thursday,
+            Self::Friday => Weekday::Friday,
+            Self::Saturday => Weekday::Saturday,
+            Self::Sunday => Weekday::Sunday,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -45,6 +83,7 @@ pub struct ScheduleRecord {
     pub start_deadline: Option<String>,
     pub start_deadline_seconds: u64,
     pub local_endpoint: Option<String>,
+    #[serde(default)]
     pub after_quota_reset: bool,
     pub occurrence: Option<OccurrenceRecord>,
     pub created_at: String,
@@ -78,8 +117,7 @@ pub struct QueueRun {
 
 pub struct PreparedSchedule {
     pub timezone: String,
-    pub scheduled_at: Option<String>,
-    pub deadline_at: Option<String>,
+    pub scheduled_at: Option<jiff::Timestamp>,
 }
 
 pub fn prepare(input: &ScheduleInput) -> Result<PreparedSchedule> {
@@ -95,17 +133,10 @@ pub fn prepare(input: &ScheduleInput) -> Result<PreparedSchedule> {
         | ScheduleRule::Manual
         | ScheduleRule::IntervalAfterSuccess { .. } => None,
     };
-    let offset = scheduled
-        .map(|timestamp| timezone.to_offset(timestamp))
-        .unwrap_or_else(|| jiff::Zoned::now().offset());
-    let deadline_at = scheduled
-        .map(|timestamp| deadline(timestamp, input.start_deadline_seconds))
-        .transpose()?
-        .map(|timestamp| timestamp.to_string());
+    let offset = timezone.to_offset(scheduled.unwrap_or(now));
     Ok(PreparedSchedule {
         timezone: timezone_name(&timezone, offset),
-        scheduled_at: scheduled.map(|timestamp| timestamp.to_string()),
-        deadline_at,
+        scheduled_at: scheduled,
     })
 }
 
@@ -151,7 +182,7 @@ fn next_calendar_occurrence(
         .map_err(|error| ReactorError::InvalidSchedule(format!("invalid local time: {error}")))?;
     let mut date = timezone.to_datetime(after).date();
     for _ in 0..=7 {
-        if date_matches(rule, date.weekday())? {
+        if date_matches(rule, date.weekday()) {
             let timestamp = timezone
                 .to_ambiguous_zoned(date.to_datetime(time))
                 .compatible()
@@ -170,31 +201,17 @@ fn next_calendar_occurrence(
     ))
 }
 
-fn date_matches(rule: &ScheduleRule, weekday: jiff::civil::Weekday) -> Result<bool> {
+fn date_matches(rule: &ScheduleRule, weekday: jiff::civil::Weekday) -> bool {
     match rule {
-        ScheduleRule::Daily { .. } => Ok(true),
-        ScheduleRule::Weekdays { .. } => Ok(!matches!(
+        ScheduleRule::Daily { .. } => true,
+        ScheduleRule::Weekdays { .. } => !matches!(
             weekday,
             jiff::civil::Weekday::Saturday | jiff::civil::Weekday::Sunday
-        )),
-        ScheduleRule::Weekly { weekday: value, .. } => Ok(weekday == parse_weekday(value)?),
-        _ => Ok(false),
-    }
-}
-
-fn parse_weekday(value: &str) -> Result<jiff::civil::Weekday> {
-    use jiff::civil::Weekday;
-    match value.to_ascii_lowercase().as_str() {
-        "monday" => Ok(Weekday::Monday),
-        "tuesday" => Ok(Weekday::Tuesday),
-        "wednesday" => Ok(Weekday::Wednesday),
-        "thursday" => Ok(Weekday::Thursday),
-        "friday" => Ok(Weekday::Friday),
-        "saturday" => Ok(Weekday::Saturday),
-        "sunday" => Ok(Weekday::Sunday),
-        _ => Err(ReactorError::InvalidSchedule(
-            "weekday must be a full English weekday name".to_owned(),
-        )),
+        ),
+        ScheduleRule::Weekly {
+            weekday: expected, ..
+        } => weekday == expected.to_jiff(),
+        _ => false,
     }
 }
 
@@ -238,6 +255,7 @@ fn parse_offset(value: &str) -> Result<jiff::tz::Offset> {
         .map(|part| part.parse::<i32>().ok())
         .unwrap_or(Some(0));
     if parts.next().is_some()
+        || hours.is_some_and(|value| !(0..=25).contains(&value))
         || minutes.is_some_and(|value| !(0..60).contains(&value))
         || seconds.is_some_and(|value| !(0..60).contains(&value))
     {
@@ -302,11 +320,7 @@ fn validate(input: &ScheduleInput) -> Result<()> {
                 ReactorError::InvalidSchedule(format!("invalid local time: {error}"))
             })?;
         }
-        ScheduleRule::Weekly {
-            weekday,
-            local_time,
-        } => {
-            parse_weekday(weekday)?;
+        ScheduleRule::Weekly { local_time, .. } => {
             validate_time_text(local_time, "local time")?;
             local_time.parse::<jiff::civil::Time>().map_err(|error| {
                 ReactorError::InvalidSchedule(format!("invalid local time: {error}"))

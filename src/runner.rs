@@ -279,6 +279,13 @@ fn execute_prepared(
         StopReason::Exited if log_failed => (RunState::Failed, "log_io_error"),
         StopReason::Exited if stdin_result.is_err() => (RunState::Failed, "input_failed"),
         StopReason::Exited
+            if !outcome.status.success()
+                && prepared.agent.adapter().failure_requires_review(&output) =>
+        {
+            (RunState::ReviewRequired, "sandbox_denied")
+        }
+        StopReason::Exited if !outcome.status.success() => (RunState::Failed, "agent_exit"),
+        StopReason::Exited
             if execution
                 .record
                 .limits
@@ -293,9 +300,6 @@ fn execute_prepared(
             (RunState::ReviewRequired, "token_usage_unavailable")
         }
         StopReason::Exited if outcome.status.success() => (RunState::Succeeded, "completed"),
-        StopReason::Exited if prepared.agent.adapter().failure_requires_review(&output) => {
-            (RunState::ReviewRequired, "sandbox_denied")
-        }
         StopReason::Exited => (RunState::Failed, "agent_exit"),
     };
     app.store.finish_run(
