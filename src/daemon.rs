@@ -8,7 +8,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -20,6 +20,7 @@ use crate::{
 };
 
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn run(paths: ReactorPaths) -> Result<()> {
     let _lock = DaemonLock::acquire(&paths)?;
@@ -32,20 +33,21 @@ pub fn run(paths: ReactorPaths) -> Result<()> {
 
     let (sender, receiver) = mpsc::channel();
     let mut spawned = 0_usize;
-    for _ in 0..worker_count {
+    for worker_index in 0..worker_count {
         let sender = sender.clone();
         let paths = paths.clone();
         let worker_shutdown = shutdown.clone();
         let result = thread::Builder::new()
             .name("reactor-worker".to_owned())
             .spawn(move || {
-                let outcome =
-                    match catch_unwind(AssertUnwindSafe(|| worker(&paths, &worker_shutdown))) {
-                        Ok(result) => result,
-                        Err(_) => Err(ReactorError::InvalidStoredData(
-                            "daemon worker panicked".to_owned(),
-                        )),
-                    };
+                let outcome = match catch_unwind(AssertUnwindSafe(|| {
+                    worker(&paths, &worker_shutdown, worker_index == 0)
+                })) {
+                    Ok(result) => result,
+                    Err(_) => Err(ReactorError::InvalidStoredData(
+                        "daemon worker panicked".to_owned(),
+                    )),
+                };
                 let _ = sender.send(outcome);
             });
         match result {
@@ -85,9 +87,14 @@ pub fn is_running(paths: &ReactorPaths) -> Result<bool> {
     Ok(DaemonLock::try_acquire(paths, false)?.is_none())
 }
 
-fn worker(paths: &ReactorPaths, shutdown: &AtomicBool) -> Result<()> {
+fn worker(paths: &ReactorPaths, shutdown: &AtomicBool, maintains_recovery: bool) -> Result<()> {
     let mut app = App::open(paths)?;
+    let mut last_recovery = Instant::now();
     while !shutdown.load(Ordering::Acquire) {
+        if maintains_recovery && last_recovery.elapsed() >= RECOVERY_INTERVAL {
+            runner::recover(paths, &mut app)?;
+            last_recovery = Instant::now();
+        }
         if runner::execute_available(paths, &mut app, Some(shutdown))?.is_none() {
             thread::sleep(IDLE_POLL_INTERVAL);
         }
