@@ -14,7 +14,7 @@ Reactor commands use text output by default. Automation should pass `--output js
 ```
 
 - Field names use `snake_case`.
-- Generated IDs use UUID v7. A Plan may instead use a user-provided name.
+- Generated Workspace and Plan IDs use UUID v7. Plans and Schedules may instead use a user-provided name.
 - Timestamps use RFC 3339 UTC.
 - A minor schema release may add fields. Consumers must ignore unknown fields.
 - A major schema release may change or remove fields.
@@ -98,12 +98,15 @@ reactor plan create [--name <name>] --workspace <workspace_id> --context <text|-
 reactor plan draft [--name <name>] --workspace <workspace_id> --agent <agent> --file <context> [--idempotency-key <key>]
 reactor plan show <plan_id> [--version <number>]
 reactor plan list
-reactor plan revise <plan_id> --file <plan.yaml> [--idempotency-key <key>]
+reactor plan revise <plan_id> (--file <plan.yaml|-> | <inline fields>) [--idempotency-key <key>]
 reactor plan review <plan_id> [--idempotency-key <key>]
+reactor plan review <plan_id> --approve [--approved-by <name>] [--idempotency-key <key>]
 reactor plan approve <plan_id> [--approved-by <name>] [--idempotency-key <key>]
+reactor plan unapprove <plan_id> [--idempotency-key <key>]
+reactor plan delete <plan_id> [--idempotency-key <key>]
 ```
 
-`--name` assigns a short Plan identifier using the Workspace ID character rules. Without it, Reactor generates an ID. `plan create` stores reviewed input without running an Agent. Simple input defaults to Codex, inherited requirements, a 7,200 second wall-time limit, and one Attempt. `--context -` reads plain text from stdin. `plan draft` asks an Agent to produce a draft and expected requirements. Draft generation uses each Agent's read-only mode with Network, MCP, Hooks, and user customization disabled where supported. Its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules. `plan review` displays versions already in review or approved without changing their state.
+`--name` assigns a short Plan identifier using the Workspace ID character rules. Without it, Reactor generates an ID. A missing named `--file` creates a non-overwriting JSON or YAML template and does not create a Plan. `plan create` stores reviewed input without running an Agent. Simple input defaults to Codex, inherited requirements, a 7,200 second wall-time limit, and one Attempt. `--context -` reads plain text from stdin. `plan draft` asks an Agent to produce a draft and expected requirements. Draft generation uses each Agent's read-only mode with Network, MCP, Hooks, and user customization disabled where supported. Its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules. `plan revise` can replace the whole document or copy the current Version and change selected scalar fields. `plan review` displays versions already in review or approved without changing their state; `--approve` performs both transitions. Approval cancellation is rejected while a Schedule or Run references the affected Plan Version. Plan deletion requires all registered Schedules to be deleted first.
 
 ```yaml
 workspace_id: example
@@ -128,17 +131,19 @@ When `provider` is omitted, Reactor assigns `openai`, `qwen`, or `anthropic` fro
 ## Schedules and queue
 
 ```shell
-reactor schedule add --file <schedule.yaml|-> [--idempotency-key <key>]
-reactor schedule add <plan_id> (--immediate | --manual | --at <local_time>) [--version <number>] [--start-deadline-seconds <seconds>] [--local-endpoint <name>] [--after-quota-reset] [--idempotency-key <key>]
+reactor schedule add --file <schedule.yaml|-> [--name <schedule_id>] [--idempotency-key <key>]
+reactor schedule add <plan_id> (--immediate | --manual | --at <local_time>) [--name <schedule_id>] [--version <number>] [--start-deadline-seconds <seconds>] [--local-endpoint <name>] [--after-quota-reset] [--idempotency-key <key>]
 reactor schedule show <schedule_id>
 reactor schedule list
-reactor schedule pause <schedule_id> [--idempotency-key <key>]
-reactor schedule resume <schedule_id> [--idempotency-key <key>]
+reactor schedule stop <schedule_id> [--idempotency-key <key>]
+reactor schedule delete <schedule_id> [--idempotency-key <key>]
 reactor schedule trigger <schedule_id> [--idempotency-key <key>]
 reactor queue list
 ```
 
 A schedule pins an approved Plan Version. Omitting `plan_version` selects the current approved version. `start_deadline_seconds` defaults to one hour.
+
+Without `--name`, the Schedule ID is `<plan_id>-<rule>` with a numeric suffix on collision. `stop` prevents future occurrences and cancels a pending or active Run. Only a stopped Schedule can be deleted. After every registered Schedule is deleted and every active Run has ended, the Plan can be deleted. Deletion hides these records while preserving past Runs and audit events; deleted IDs are not reused.
 
 ```yaml
 plan_id: 01994ca0-0000-7000-8000-000000000000
@@ -165,18 +170,35 @@ reactor run progress <run_id>
 reactor run result <run_id>
 reactor run diff <run_id>
 reactor run review <run_id>
-reactor run list
+reactor run list [--limit <1..10000> | --all] [--status <state>] [--workspace <workspace_id>]
 reactor run cancel <run_id> [--idempotency-key <key>]
 reactor run retry <run_id> [--idempotency-key <key>]
+reactor run clear <run_id>
+reactor run clear [-f|--all] [--before <YYYY-MM-DD>]
 ```
 
 `run next` claims and executes one eligible Run. It blocks until the Agent exits, the wall-time limit is reached, or another process requests cancellation. Cancellation stops the Agent process tree, waits up to three seconds, collects the remaining output, and then records `CANCELLED`.
 
 `run retry` accepts `FAILED`, `CANCELLED`, `LIMIT_REACHED`, and `REVIEW_REQUIRED` while Attempt budget remains. It leaves the source Run unchanged and queues one replacement Run with the same approved Plan Version and remaining execution limits. Further retries continue from the latest replacement Run.
 
+Scheduled Run IDs use `<schedule_id>-YYYYMMDDTHHMMSSZ` in UTC and add a numeric suffix on collision. Retry IDs append `-retry-N`. Existing UUID Run IDs remain valid. `run list` returns the newest 50 matching records unless `--limit` or `--all` is supplied.
+
+`run clear` deletes all `SUCCEEDED`, `FAILED`, `CANCELLED`, `LIMIT_REACHED`, and `MISSED` Runs with their Attempts, results, pending checkpoints, and logs. A specific Run ID or `-f`/`--all` also includes `REVIEW_REQUIRED`. `--before` compares the Run creation time with midnight UTC. Active Runs are always protected, audit events are retained, and a retained Schedule occurrence exposes the removed Run state as `CLEARED`.
+
+Run text lists expose the final eight characters as a short code. Run and Log commands accept either the complete ID or a unique suffix of at least four characters.
+
 `run review` displays the termination reason, log path, and retained Diff information for a `REVIEW_REQUIRED` Run. Attempt logs are stored under Reactor's data directory, rotate at 10 MiB, retain at most five files, and expire after 30 days. Sandbox permission failures become `REVIEW_REQUIRED`; Reactor does not widen the approved policy automatically.
 
 Each claimed Run records its Workspace and writable roots before and after execution. Text files up to 1 MiB receive a unified diff; binary and larger files retain hashes and sizes. A snapshot accepts 250,000 files and embeds up to 64 MiB of text; remaining text retains hashes and sizes. `.gitignore` and `.reactorignore` apply, and symlinks are not followed. Only the latest diff is retained per Workspace.
+
+```shell
+reactor log list
+reactor log show <run_id_or_code> [--all]
+reactor log delete <run_id_or_code>
+reactor log prune
+```
+
+Log deletion is rejected for active Runs and emits `RUN_LOGS_DELETED`. Pruning applies the normal 30-day retention limit.
 
 At startup and periodically while running, the service changes interrupted `PREPARING` or `RUNNING` Runs with expired execution leases to `REVIEW_REQUIRED` and completes their pending diff. It never reattaches to or restarts an Agent process.
 
