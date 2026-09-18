@@ -109,6 +109,7 @@ impl Store {
                 ended_at: None,
                 exit_code: None,
                 termination_reason: None,
+                token_usage: None,
                 log_path: log_path.to_owned(),
             };
             transaction.execute(
@@ -284,8 +285,36 @@ impl Store {
                 }),
                 &now,
             )?;
+            super::schedules::finish_recurring_run(
+                transaction,
+                current.occurrence_id.as_deref(),
+                next == RunState::Succeeded,
+                now.parse::<jiff::Timestamp>()
+                    .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?,
+            )?;
             query_run(transaction, run_id)
         })
+    }
+
+    pub(crate) fn record_attempt_usage(
+        &self,
+        run_id: &str,
+        attempt_id: &str,
+        tokens: u64,
+    ) -> Result<()> {
+        self.ensure_supported_schema()?;
+        let usage = serde_json::json!({ "tokens": tokens }).to_string();
+        let changed = self.connection.execute(
+            "UPDATE attempts SET usage_json = ?1
+             WHERE id = ?2 AND run_id = ?3 AND ended_at IS NULL",
+            params![usage, attempt_id, run_id],
+        )?;
+        if changed != 1 {
+            return Err(ReactorError::InvalidStoredData(
+                "active attempt is missing".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn record_run_result(
@@ -416,6 +445,13 @@ impl Store {
                     }),
                     &now,
                 )?;
+                super::schedules::finish_recurring_run(
+                    transaction,
+                    run.occurrence_id.as_deref(),
+                    false,
+                    now.parse::<jiff::Timestamp>()
+                        .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?,
+                )?;
                 recovered.push(query_run(transaction, &run_id)?);
             }
             Ok(recovered)
@@ -456,6 +492,13 @@ fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
                 }),
                 &now,
             )?;
+            super::schedules::finish_recurring_run(
+                transaction,
+                run.occurrence_id.as_deref(),
+                false,
+                now.parse::<jiff::Timestamp>()
+                    .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?,
+            )?;
         }
         RunState::Preparing | RunState::Running => {
             if run.cancel_requested_at.is_none() {
@@ -492,6 +535,20 @@ fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Resul
             state.as_str()
         )));
     }
+    let used_attempts: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM attempts WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    if used_attempts >= source.limits.max_attempts {
+        return Err(ReactorError::InvalidArgument(
+            "run attempt limit has been reached".to_owned(),
+        ));
+    }
+    let mut remaining_limits = source.limits.clone();
+    remaining_limits.max_attempts -= used_attempts;
+    let limits_json = serde_json::to_string(&remaining_limits)
+        .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
     let now = crate::time::now_utc();
     let changed = transaction.execute(
         "INSERT INTO runs
@@ -499,10 +556,10 @@ fn retry(transaction: &Transaction<'_>, run_id: &str, new_run_id: &str) -> Resul
           provider, local_endpoint, policy_snapshot_json, limits_snapshot_json,
           ready_at, created_at, updated_at)
          SELECT ?1, workspace_id, plan_id, plan_version, NULL, 'QUEUED', agent_kind,
-                provider, local_endpoint, policy_snapshot_json, limits_snapshot_json,
-                ?2, ?2, ?2
-         FROM runs WHERE id = ?3 AND state = ?4",
-        params![new_run_id, now, run_id, state.as_str()],
+                provider, local_endpoint, policy_snapshot_json, ?2,
+                ?3, ?3, ?3
+         FROM runs WHERE id = ?4 AND state = ?5",
+        params![new_run_id, limits_json, now, run_id, state.as_str()],
     )?;
     if changed != 1 {
         return Err(ReactorError::InvalidStoredData(
@@ -612,7 +669,8 @@ fn query_attempt(connection: &Connection, run_id: &str) -> Result<Option<Attempt
     Ok(connection
         .query_row(
             "SELECT id, attempt_number, process_id, process_started_at, started_at,
-                    ended_at, exit_code, termination_reason, log_path
+                    ended_at, exit_code, termination_reason,
+                    json_extract(usage_json, '$.tokens'), log_path
              FROM attempts WHERE run_id = ?1 ORDER BY attempt_number DESC LIMIT 1",
             [run_id],
             map_attempt,
@@ -630,7 +688,10 @@ fn map_attempt(row: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
         ended_at: row.get(5)?,
         exit_code: row.get(6)?,
         termination_reason: row.get(7)?,
-        log_path: row.get(8)?,
+        token_usage: row
+            .get::<_, Option<i64>>(8)?
+            .and_then(|value| u64::try_from(value).ok()),
+        log_path: row.get(9)?,
     })
 }
 

@@ -69,6 +69,10 @@ pub trait AgentAdapter {
 
     fn failure_requires_review(&self, output: &str) -> bool;
 
+    fn token_usage(&self, output: &str) -> Option<u64>;
+
+    fn quota_reset_at(&self, provider: Option<&str>) -> Result<Option<jiff::Timestamp>>;
+
     fn draft_command(
         &self,
         workspace: &Path,

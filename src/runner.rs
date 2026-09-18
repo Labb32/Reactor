@@ -267,12 +267,31 @@ fn execute_prepared(
     let output = RunLog::tail(&log);
     let log_failed = capture_result.is_err() || flush_result.is_err() || output.is_err();
     let output = output.unwrap_or_default();
+    let token_usage = prepared.agent.adapter().token_usage(&output);
+    if let Some(tokens) = token_usage {
+        app.store
+            .record_attempt_usage(run_id, &attempt.id, tokens)?;
+    }
 
     let (next, reason) = match outcome.reason {
         StopReason::Cancelled => (RunState::Cancelled, "cancel_requested"),
         StopReason::TimedOut => (RunState::LimitReached, "wall_time_limit"),
         StopReason::Exited if log_failed => (RunState::Failed, "log_io_error"),
         StopReason::Exited if stdin_result.is_err() => (RunState::Failed, "input_failed"),
+        StopReason::Exited
+            if execution
+                .record
+                .limits
+                .max_tokens
+                .is_some_and(|limit| token_usage.is_some_and(|usage| usage > limit)) =>
+        {
+            (RunState::LimitReached, "token_limit")
+        }
+        StopReason::Exited
+            if execution.record.limits.max_tokens.is_some() && token_usage.is_none() =>
+        {
+            (RunState::ReviewRequired, "token_usage_unavailable")
+        }
         StopReason::Exited if outcome.status.success() => (RunState::Succeeded, "completed"),
         StopReason::Exited if prepared.agent.adapter().failure_requires_review(&output) => {
             (RunState::ReviewRequired, "sandbox_denied")

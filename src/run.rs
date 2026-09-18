@@ -12,6 +12,7 @@ pub struct AttemptRecord {
     pub ended_at: Option<String>,
     pub exit_code: Option<i32>,
     pub termination_reason: Option<String>,
+    pub token_usage: Option<u64>,
     pub log_path: String,
 }
 

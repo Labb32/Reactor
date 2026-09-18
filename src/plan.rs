@@ -49,6 +49,8 @@ pub struct ExplicitRequirements {
 pub struct PlanLimits {
     pub max_wall_time_seconds: u64,
     pub max_attempts: u32,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
 }
 
 impl Default for PlanLimits {
@@ -56,6 +58,7 @@ impl Default for PlanLimits {
         Self {
             max_wall_time_seconds: 7_200,
             max_attempts: 1,
+            max_tokens: None,
         }
     }
 }
@@ -217,6 +220,15 @@ fn validate_input(input: &PlanInput) -> Result<()> {
         return Err(ReactorError::InvalidPlan(
             "wall time must be between 1 second and 7 days, and attempts between 1 and 10"
                 .to_owned(),
+        ));
+    }
+    if input
+        .limits
+        .max_tokens
+        .is_some_and(|value| value == 0 || value > i64::MAX as u64)
+    {
+        return Err(ReactorError::InvalidPlan(
+            "token limit must be between 1 and 9223372036854775807".to_owned(),
         ));
     }
     validate_optional_name("provider", input.provider.as_deref())?;

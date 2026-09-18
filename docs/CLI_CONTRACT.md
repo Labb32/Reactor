@@ -69,7 +69,8 @@ Scheduled Agent commands never request interactive approval. Reactor applies the
 ## Plans
 
 ```shell
-reactor plan create --file <plan.yaml> [--idempotency-key <key>]
+reactor plan create --file <plan.yaml|-> [--idempotency-key <key>]
+reactor plan create --workspace <workspace_id> --context <text|-> [--title <title>] [--agent <agent>] [--idempotency-key <key>]
 reactor plan draft --workspace <workspace_id> --agent <agent> --file <context> [--idempotency-key <key>]
 reactor plan show <plan_id> [--version <number>]
 reactor plan list
@@ -78,7 +79,7 @@ reactor plan review <plan_id> [--idempotency-key <key>]
 reactor plan approve <plan_id> [--approved-by <name>] [--idempotency-key <key>]
 ```
 
-`plan create` stores a reviewed JSON or YAML document without running an Agent and defaults to `requirements: inherit`. `plan draft` reads plain text or Markdown and optionally asks an Agent to produce a draft and expected requirements. Draft generation uses a read-only sandbox with Network, MCP, Hooks, and user configuration disabled. Its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules.
+`plan create` stores reviewed input without running an Agent. Simple input defaults to Codex, inherited requirements, a 7,200 second wall-time limit, and one Attempt. `--context -` reads plain text from stdin. `plan draft` asks an Agent to produce a draft and expected requirements. Draft generation uses a read-only sandbox with Network, MCP, Hooks, and user configuration disabled. Its output still requires user review. An approved Version is immutable and may be reused by recurring Schedules.
 
 ```yaml
 workspace_id: example
@@ -91,16 +92,18 @@ completion_criteria:
 limits:
   max_wall_time_seconds: 7200
   max_attempts: 1
+  max_tokens: 100000
 ```
 
 Explicit requirements may contain `writable_roots`, `network`, `mcp`, `hooks`, and `tools`. They describe the minimum expected environment and never expand the Workspace policy. Tool availability and current Workspace readiness are checked before approval.
 
-`max_wall_time_seconds` accepts 1 second through 7 days. `max_attempts` accepts 1 through 10; Reactor does not move a terminal Run back into execution.
+`max_wall_time_seconds` accepts 1 second through 7 days. `max_attempts` accepts 1 through 10 and bounds explicit retries across replacement Runs. Reactor does not move a terminal Run back into execution. `max_tokens` is optional. It uses usage reported by the Agent after exit and ends the Run as `LIMIT_REACHED` with reason `token_limit` when exceeded.
 
 ## Schedules and queue
 
 ```shell
-reactor schedule add --file <schedule.yaml> [--idempotency-key <key>]
+reactor schedule add --file <schedule.yaml|-> [--idempotency-key <key>]
+reactor schedule add <plan_id> (--immediate | --manual | --at <local_time>) [--version <number>] [--start-deadline-seconds <seconds>] [--local-endpoint <name>] [--idempotency-key <key>]
 reactor schedule show <schedule_id>
 reactor schedule list
 reactor schedule pause <schedule_id> [--idempotency-key <key>]
@@ -119,7 +122,11 @@ rule:
 start_deadline_seconds: 3600
 ```
 
-Rule types are `immediate`, `manual`, and `at`. An `at` rule interprets `local_time` in the current user time zone captured when the schedule is created. Reactor stores its IANA name when available and otherwise stores the current UTC offset. A DST gap moves to the next valid local time; a repeated local time selects its first occurrence. A paused occurrence remains pending and becomes `MISSED` if its deadline has passed when resumed.
+Rule types are `immediate`, `manual`, `at`, `daily`, `weekdays`, `weekly`, and `interval_after_success`. Calendar rules use `local_time`; `weekly` also uses a full English `weekday`. `interval_after_success` uses `seconds` and runs once immediately before applying the interval.
+
+Local-time rules use the current user time zone captured when the schedule is created. Reactor stores its IANA name when available and otherwise stores the current UTC offset. A DST gap moves to the next valid local time; a repeated local time selects its first occurrence. Reactor retains one pending future occurrence. A due occurrence past its deadline becomes `MISSED`, then a calendar rule advances directly to its next future occurrence.
+
+`after_quota_reset: true` delays an occurrence until the selected Agent and Provider report a reset time. Schedule creation fails when that information is unavailable; the current Codex adapter does not expose this Gate.
 
 `queue list` refreshes due occurrences and reports each queued Run with `eligible`, `dispatch_order`, and `blocked_by`. A Run that remains queued past its start deadline becomes `MISSED`. Dispatch uses Workspace FIFO, Workspace round-robin, one active Run per Workspace, and the configured global, Agent, Provider, and local endpoint limits.
 
@@ -138,7 +145,7 @@ reactor run retry <run_id> [--idempotency-key <key>]
 
 `run next` claims and executes one eligible Run. It blocks until the Agent exits, the wall-time limit is reached, or another process requests cancellation. Cancellation stops the Agent process tree, waits up to three seconds, collects the remaining output, and then records `CANCELLED`.
 
-`run retry` accepts `FAILED`, `CANCELLED`, `LIMIT_REACHED`, and `REVIEW_REQUIRED`. It leaves the source Run unchanged and queues a new Run with the same approved Plan Version and execution snapshots.
+`run retry` accepts `FAILED`, `CANCELLED`, `LIMIT_REACHED`, and `REVIEW_REQUIRED` while Attempt budget remains. It leaves the source Run unchanged and queues a new Run with the same approved Plan Version and remaining execution limits.
 
 Attempt logs are stored under Reactor's data directory, rotate at 10 MiB, retain at most five files, and expire after 30 days. Sandbox permission failures become `REVIEW_REQUIRED`; Reactor does not widen the approved policy automatically.
 

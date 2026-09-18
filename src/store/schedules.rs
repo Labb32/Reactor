@@ -11,9 +11,21 @@ use crate::{
 };
 
 #[derive(Deserialize, Serialize)]
+#[serde(default)]
 struct ScheduleGate {
     start_deadline_seconds: u64,
     local_endpoint: Option<String>,
+    after_quota_reset: bool,
+}
+
+impl Default for ScheduleGate {
+    fn default() -> Self {
+        Self {
+            start_deadline_seconds: crate::schedule::DEFAULT_DEADLINE_SECONDS,
+            local_endpoint: None,
+            after_quota_reset: false,
+        }
+    }
 }
 
 impl Store {
@@ -97,12 +109,28 @@ fn insert_schedule(
             "schedule requires an approved plan version".to_owned(),
         ));
     }
+    let quota_reset = if input.after_quota_reset {
+        Some(
+            plan.version
+                .agent
+                .adapter()
+                .quota_reset_at(plan.version.provider.as_deref())?
+                .ok_or_else(|| {
+                    ReactorError::InvalidSchedule(
+                        "the selected Agent does not provide quota reset information".to_owned(),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     let now = jiff::Timestamp::now();
     let now_text = now.to_string();
     let rule_json = to_json(&input.rule)?;
     let gate_json = to_json(&ScheduleGate {
         start_deadline_seconds: input.start_deadline_seconds,
         local_endpoint: input.local_endpoint.clone(),
+        after_quota_reset: input.after_quota_reset,
     })?;
     transaction.execute(
         "INSERT INTO schedules
@@ -135,23 +163,33 @@ fn insert_schedule(
 
     match &input.rule {
         ScheduleRule::Manual => {}
-        ScheduleRule::Immediate => {
-            let deadline_at = deadline(now, input.start_deadline_seconds)?.to_string();
-            update_schedule_window(transaction, id, &now_text, &deadline_at)?;
-            let occurrence_id = insert_occurrence(transaction, id, &now_text, &deadline_at)?;
-            materialize_occurrence(transaction, id, &occurrence_id, now)?;
+        ScheduleRule::Immediate | ScheduleRule::IntervalAfterSuccess { .. } => {
+            let scheduled = quota_reset.map_or(now, |reset| reset.max(now));
+            let scheduled_at = scheduled.to_string();
+            let deadline_at = deadline(scheduled, input.start_deadline_seconds)?.to_string();
+            update_schedule_window(transaction, id, &scheduled_at, &deadline_at)?;
+            let occurrence_id = insert_occurrence(transaction, id, &scheduled_at, &deadline_at)?;
+            if scheduled <= now {
+                materialize_occurrence(transaction, id, &occurrence_id, now)?;
+            }
         }
-        ScheduleRule::At { .. } => {
+        ScheduleRule::At { .. }
+        | ScheduleRule::Daily { .. }
+        | ScheduleRule::Weekdays { .. }
+        | ScheduleRule::Weekly { .. } => {
             let scheduled_at = prepared.scheduled_at.as_deref().ok_or_else(|| {
                 ReactorError::InvalidSchedule("scheduled time is missing".to_owned())
             })?;
-            let deadline_at = prepared.deadline_at.as_deref().ok_or_else(|| {
-                ReactorError::InvalidSchedule("schedule deadline is missing".to_owned())
-            })?;
-            let occurrence_id = insert_occurrence(transaction, id, scheduled_at, deadline_at)?;
-            let scheduled = scheduled_at
+            let mut scheduled = scheduled_at
                 .parse::<jiff::Timestamp>()
                 .map_err(|error| ReactorError::InvalidSchedule(error.to_string()))?;
+            if let Some(reset) = quota_reset {
+                scheduled = scheduled.max(reset);
+            }
+            let scheduled_at = scheduled.to_string();
+            let deadline_at = deadline(scheduled, input.start_deadline_seconds)?.to_string();
+            update_schedule_window(transaction, id, &scheduled_at, &deadline_at)?;
+            let occurrence_id = insert_occurrence(transaction, id, &scheduled_at, &deadline_at)?;
             if scheduled <= now {
                 materialize_occurrence(transaction, id, &occurrence_id, now)?;
             }
@@ -171,20 +209,23 @@ fn trigger(transaction: &Transaction<'_>, schedule_id: &str) -> Result<ScheduleR
         ));
     }
     let now = jiff::Timestamp::now();
-    let deadline_at = deadline(now, schedule.start_deadline_seconds)?;
+    let scheduled = quota_ready_at(transaction, &schedule)?.map_or(now, |reset| reset.max(now));
+    let deadline_at = deadline(scheduled, schedule.start_deadline_seconds)?;
     update_schedule_window(
         transaction,
         schedule_id,
-        &now.to_string(),
+        &scheduled.to_string(),
         &deadline_at.to_string(),
     )?;
     let occurrence_id = insert_occurrence(
         transaction,
         schedule_id,
-        &now.to_string(),
+        &scheduled.to_string(),
         &deadline_at.to_string(),
     )?;
-    materialize_occurrence(transaction, schedule_id, &occurrence_id, now)?;
+    if scheduled <= now {
+        materialize_occurrence(transaction, schedule_id, &occurrence_id, now)?;
+    }
     query_schedule(transaction, schedule_id)
 }
 
@@ -314,6 +355,10 @@ fn expire_queued_runs(transaction: &Transaction<'_>, now: &str) -> Result<usize>
             serde_json::json!({ "occurrence_id": occurrence_id, "run_id": run_id }),
             now,
         )?;
+        let schedule = query_schedule(transaction, &schedule_id)?;
+        if matches!(schedule.rule, ScheduleRule::IntervalAfterSuccess { .. }) {
+            complete_schedule(transaction, &schedule_id, now)?;
+        }
         changed += 1;
     }
     Ok(changed)
@@ -345,7 +390,11 @@ fn materialize_occurrence(
             "UPDATE schedule_occurrences SET state = 'MISSED' WHERE id = ?1 AND state = 'WAITING'",
             [occurrence_id],
         )?;
-        complete_schedule(transaction, schedule_id, &now_text)?;
+        if matches!(schedule.rule, ScheduleRule::IntervalAfterSuccess { .. }) {
+            complete_schedule(transaction, schedule_id, &now_text)?;
+        } else {
+            advance_schedule(transaction, &schedule, now)?;
+        }
         write_event(
             transaction,
             "SCHEDULE_OCCURRENCE_MISSED",
@@ -391,7 +440,7 @@ fn materialize_occurrence(
             "waiting occurrence changed unexpectedly".to_owned(),
         ));
     }
-    complete_schedule(transaction, schedule_id, &now_text)?;
+    advance_schedule(transaction, &schedule, now)?;
     write_event(
         transaction,
         "RUN_QUEUED",
@@ -451,6 +500,93 @@ fn complete_schedule(
         params![updated_at, schedule_id],
     )?;
     Ok(())
+}
+
+fn advance_schedule(
+    transaction: &Transaction<'_>,
+    schedule: &ScheduleRecord,
+    now: jiff::Timestamp,
+) -> Result<()> {
+    if let Some(next) = crate::schedule::next_occurrence(&schedule.rule, &schedule.timezone, now)? {
+        let next = quota_ready_at(transaction, schedule)?.map_or(next, |reset| reset.max(next));
+        let deadline_at = deadline(next, schedule.start_deadline_seconds)?;
+        let next_text = next.to_string();
+        let deadline_text = deadline_at.to_string();
+        update_schedule_window(transaction, &schedule.id, &next_text, &deadline_text)?;
+        insert_occurrence(transaction, &schedule.id, &next_text, &deadline_text)?;
+        transaction.execute(
+            "UPDATE schedules SET updated_at = ?1 WHERE id = ?2",
+            params![now.to_string(), schedule.id],
+        )?;
+    } else if !matches!(schedule.rule, ScheduleRule::IntervalAfterSuccess { .. }) {
+        complete_schedule(transaction, &schedule.id, &now.to_string())?;
+    }
+    Ok(())
+}
+
+pub(super) fn finish_recurring_run(
+    transaction: &Transaction<'_>,
+    occurrence_id: Option<&str>,
+    succeeded: bool,
+    completed_at: jiff::Timestamp,
+) -> Result<()> {
+    let Some(occurrence_id) = occurrence_id else {
+        return Ok(());
+    };
+    let schedule_id: Option<String> = transaction
+        .query_row(
+            "SELECT s.id
+             FROM schedules s
+             JOIN schedule_occurrences so ON so.schedule_id = s.id
+             WHERE so.id = ?1 AND s.status IN ('ACTIVE', 'PAUSED')",
+            [occurrence_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(schedule_id) = schedule_id else {
+        return Ok(());
+    };
+    let schedule = query_schedule(transaction, &schedule_id)?;
+    if !matches!(schedule.rule, ScheduleRule::IntervalAfterSuccess { .. }) {
+        return Ok(());
+    }
+    if !succeeded {
+        return complete_schedule(transaction, &schedule_id, &completed_at.to_string());
+    }
+    let next = crate::schedule::interval_after_success(&schedule.rule, completed_at)?
+        .ok_or_else(|| ReactorError::InvalidStoredData("success interval is missing".to_owned()))?;
+    let next = quota_ready_at(transaction, &schedule)?.map_or(next, |reset| reset.max(next));
+    let deadline_at = deadline(next, schedule.start_deadline_seconds)?;
+    let next_text = next.to_string();
+    let deadline_text = deadline_at.to_string();
+    update_schedule_window(transaction, &schedule_id, &next_text, &deadline_text)?;
+    insert_occurrence(transaction, &schedule_id, &next_text, &deadline_text)?;
+    transaction.execute(
+        "UPDATE schedules SET updated_at = ?1 WHERE id = ?2",
+        params![completed_at.to_string(), schedule_id],
+    )?;
+    Ok(())
+}
+
+fn quota_ready_at(
+    transaction: &Transaction<'_>,
+    schedule: &ScheduleRecord,
+) -> Result<Option<jiff::Timestamp>> {
+    if !schedule.after_quota_reset {
+        return Ok(None);
+    }
+    let plan =
+        super::plans::query_plan(transaction, &schedule.plan_id, Some(schedule.plan_version))?;
+    plan.version
+        .agent
+        .adapter()
+        .quota_reset_at(plan.version.provider.as_deref())?
+        .ok_or_else(|| {
+            ReactorError::InvalidSchedule(
+                "quota reset information is no longer available".to_owned(),
+            )
+        })
+        .map(Some)
 }
 
 fn query_schedule(connection: &Connection, schedule_id: &str) -> Result<ScheduleRecord> {
@@ -515,6 +651,7 @@ fn query_schedule(connection: &Connection, schedule_id: &str) -> Result<Schedule
         start_deadline,
         start_deadline_seconds: gate.start_deadline_seconds,
         local_endpoint: gate.local_endpoint,
+        after_quota_reset: gate.after_quota_reset,
         occurrence: query_latest_occurrence(connection, schedule_id)?,
         created_at,
         updated_at,

@@ -17,39 +17,16 @@ reactor workspace add ./project --id project
 reactor workspace prepare project --agent codex
 ```
 
-Create `plan.yaml`.
-
-```yaml
-workspace_id: project
-title: Update dependencies
-agent: codex
-context: Update compatible dependencies and summarize the changes.
-requirements: inherit
-completion_criteria:
-  - Report changed files and unresolved issues
-limits:
-  max_wall_time_seconds: 7200
-  max_attempts: 1
-```
-
 Create, review, and approve the Plan. Copy the Plan ID from the first command.
 
 ```shell
-reactor plan create --file plan.yaml
+reactor plan create --workspace project --context "Update compatible dependencies and summarize the changes."
 reactor plan review <plan-id>
 reactor plan approve <plan-id>
 ```
 
-Create `schedule.yaml` and queue the approved Plan immediately.
-
-```yaml
-plan_id: <plan-id>
-rule:
-  type: immediate
-```
-
 ```shell
-reactor schedule add --file schedule.yaml
+reactor schedule add <plan-id> --immediate
 reactor queue list
 reactor run next
 ```
@@ -83,6 +60,15 @@ reactor run next
 
 Manage pending schedules with `schedule list`, `schedule show`, `schedule pause`, and `schedule resume`.
 
+Recurring rules use a schedule document. Available types are `daily`, `weekdays`, `weekly`, and `interval_after_success`.
+
+```yaml
+plan_id: <plan-id>
+rule:
+  type: weekdays
+  local_time: 09:00:00
+```
+
 ## Common commands
 
 ```shell
@@ -106,6 +92,6 @@ reactor snapshot --output json
 reactor events --after 0 --follow --output jsonl
 ```
 
-Document inputs accept JSON or YAML with `--file <path>`. Use `--file -` for stdin. Mutation commands accept `--idempotency-key <key>` when safe retries are required.
+Document inputs accept JSON or YAML with `--file <path>`. Use `--file -` for stdin. Plan Context also accepts `--context -`. Mutation commands accept `--idempotency-key <key>` when safe retries are required.
 
 See [CLI_CONTRACT.md](CLI_CONTRACT.md) for schemas, exit codes, sandbox policy, and retention rules.

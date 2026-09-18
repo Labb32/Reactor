@@ -28,9 +28,10 @@ Reactor는 기기와 daemon이 켜져 있을 때만 동작합니다. 꺼져 있�
 reactor init
 reactor workspace add ./project --id project
 reactor workspace prepare project --agent codex
-reactor plan create --file plan.yaml
+reactor plan create --workspace project --context "Update dependencies and summarize the changes."
+reactor plan review <plan-id>
 reactor plan approve <plan-id>
-reactor schedule add --file schedule.yaml
+reactor schedule add <plan-id> --immediate
 reactor run progress <run-id>
 reactor run diff <run-id>
 reactor run result <run-id>

@@ -39,7 +39,35 @@ enum PlanCommand {
 struct PlanWriteArgs {
     /// Read a plan document from JSON or YAML.
     #[arg(long, value_name = "PATH")]
-    file: String,
+    file: Option<String>,
+
+    #[arg(long)]
+    workspace: Option<String>,
+
+    /// Use plain Context text or '-' for stdin.
+    #[arg(long, value_name = "TEXT")]
+    context: Option<String>,
+
+    #[arg(long)]
+    title: Option<String>,
+
+    #[arg(long, value_enum)]
+    agent: Option<AgentKind>,
+
+    #[arg(long)]
+    provider: Option<String>,
+
+    #[arg(long)]
+    model: Option<String>,
+
+    #[arg(long)]
+    max_wall_time_seconds: Option<u64>,
+
+    #[arg(long)]
+    max_attempts: Option<u32>,
+
+    #[arg(long)]
+    max_tokens: Option<u64>,
 
     #[arg(long)]
     idempotency_key: Option<String>,
@@ -68,6 +96,9 @@ struct PlanDraftArgs {
 
     #[arg(long, default_value_t = 1)]
     max_attempts: u32,
+
+    #[arg(long)]
+    max_tokens: Option<u64>,
 
     #[arg(long, default_value_t = plan_draft::DEFAULT_TIMEOUT_SECONDS)]
     draft_timeout_seconds: u64,
@@ -166,6 +197,7 @@ fn draft(format: OutputFormat, arguments: &PlanDraftArgs) -> Result<()> {
         PlanLimits {
             max_wall_time_seconds: arguments.max_wall_time_seconds,
             max_attempts: arguments.max_attempts,
+            max_tokens: arguments.max_tokens,
         },
     );
     let input = prepare_input(input, &workspace)?;
@@ -176,7 +208,7 @@ fn draft(format: OutputFormat, arguments: &PlanDraftArgs) -> Result<()> {
 }
 
 fn create(format: OutputFormat, arguments: &PlanWriteArgs) -> Result<()> {
-    let input = input::read_document::<PlanInput>(&arguments.file)?;
+    let input = plan_input(arguments)?;
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let workspace = app.store.get_workspace(&input.workspace_id)?;
@@ -185,6 +217,71 @@ fn create(format: OutputFormat, arguments: &PlanWriteArgs) -> Result<()> {
         .store
         .create_plan(&input, arguments.idempotency_key.as_deref())?;
     write_plan(format, &app.instance_id, &plan)
+}
+
+fn plan_input(arguments: &PlanWriteArgs) -> Result<PlanInput> {
+    if let Some(file) = &arguments.file {
+        if arguments.workspace.is_some()
+            || arguments.context.is_some()
+            || arguments.title.is_some()
+            || arguments.agent.is_some()
+            || arguments.provider.is_some()
+            || arguments.model.is_some()
+            || arguments.max_wall_time_seconds.is_some()
+            || arguments.max_attempts.is_some()
+            || arguments.max_tokens.is_some()
+        {
+            return Err(ReactorError::InvalidArgument(
+                "--file cannot be combined with simple Plan arguments".to_owned(),
+            ));
+        }
+        return input::read_document::<PlanInput>(file);
+    }
+    let workspace_id = arguments.workspace.clone().ok_or_else(|| {
+        ReactorError::InvalidArgument("--workspace is required without --file".to_owned())
+    })?;
+    let context_value = arguments.context.as_deref().ok_or_else(|| {
+        ReactorError::InvalidArgument("--context is required without --file".to_owned())
+    })?;
+    let context = if context_value == "-" {
+        input::read_text("-")?
+    } else {
+        context_value.to_owned()
+    };
+    let defaults = PlanLimits::default();
+    Ok(PlanInput {
+        workspace_id,
+        title: arguments
+            .title
+            .clone()
+            .unwrap_or_else(|| default_title(&context)),
+        context,
+        agent: arguments.agent.unwrap_or(AgentKind::Codex),
+        provider: arguments.provider.clone(),
+        model: arguments.model.clone(),
+        requirements: Default::default(),
+        completion_criteria: Vec::new(),
+        limits: PlanLimits {
+            max_wall_time_seconds: arguments
+                .max_wall_time_seconds
+                .unwrap_or(defaults.max_wall_time_seconds),
+            max_attempts: arguments.max_attempts.unwrap_or(defaults.max_attempts),
+            max_tokens: arguments.max_tokens,
+        },
+    })
+}
+
+fn default_title(context: &str) -> String {
+    let line = context
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Quick task");
+    let mut end = line.len().min(200);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].trim().to_owned()
 }
 
 fn revise(format: OutputFormat, arguments: &PlanReviseArgs) -> Result<()> {
@@ -284,6 +381,7 @@ fn draft_request(arguments: &PlanDraftArgs, context: &str) -> Result<Vec<u8>> {
         "model": arguments.model,
         "max_wall_time_seconds": arguments.max_wall_time_seconds,
         "max_attempts": arguments.max_attempts,
+        "max_tokens": arguments.max_tokens,
         "draft_timeout_seconds": arguments.draft_timeout_seconds,
         "context": context
     }))

@@ -123,6 +123,8 @@ impl AgentAdapter for CodexAdapter {
                 "network_policy": true,
                 "mcp": mcp_supported,
                 "hooks": hooks_supported,
+                "token_usage": true,
+                "quota_reset": false,
                 "user_config_loaded": true
             }),
         })
@@ -204,6 +206,14 @@ impl AgentAdapter for CodexAdapter {
                     || output.contains("violation")))
     }
 
+    fn token_usage(&self, output: &str) -> Option<u64> {
+        output.lines().filter_map(codex_token_usage).next_back()
+    }
+
+    fn quota_reset_at(&self, _provider: Option<&str>) -> Result<Option<jiff::Timestamp>> {
+        Ok(None)
+    }
+
     fn draft_command(
         &self,
         workspace: &Path,
@@ -254,6 +264,18 @@ impl AgentAdapter for CodexAdapter {
             current_dir: workspace.to_owned(),
         })
     }
+}
+
+fn codex_token_usage(line: &str) -> Option<u64> {
+    let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if event.get("type")?.as_str()? != "turn.completed" {
+        return None;
+    }
+    let usage = event.get("usage")?;
+    usage
+        .get("input_tokens")?
+        .as_u64()?
+        .checked_add(usage.get("output_tokens")?.as_u64()?)
 }
 
 struct Launcher {

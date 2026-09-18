@@ -2,11 +2,11 @@ use clap::{Args, Subcommand};
 
 use crate::{
     app::App,
-    error::Result,
+    error::{ReactorError, Result},
     input, output,
     output::{Envelope, OutputFormat},
     paths::ReactorPaths,
-    schedule::{ScheduleInput, ScheduleRecord},
+    schedule::{DEFAULT_DEADLINE_SECONDS, ScheduleInput, ScheduleRecord, ScheduleRule},
 };
 
 #[derive(Debug, Args)]
@@ -33,9 +33,32 @@ enum ScheduleCommand {
 
 #[derive(Debug, Args)]
 struct ScheduleAddArgs {
+    plan_id: Option<String>,
+
     /// Read a schedule document from JSON or YAML.
     #[arg(long, value_name = "PATH")]
-    file: String,
+    file: Option<String>,
+
+    #[arg(long)]
+    immediate: bool,
+
+    #[arg(long)]
+    manual: bool,
+
+    #[arg(long, value_name = "LOCAL_TIME")]
+    at: Option<String>,
+
+    #[arg(long)]
+    version: Option<u32>,
+
+    #[arg(long)]
+    start_deadline_seconds: Option<u64>,
+
+    #[arg(long)]
+    local_endpoint: Option<String>,
+
+    #[arg(long)]
+    after_quota_reset: bool,
 
     #[arg(long)]
     idempotency_key: Option<String>,
@@ -66,7 +89,7 @@ pub(super) fn execute(format: OutputFormat, arguments: &ScheduleArgs) -> Result<
 }
 
 fn add(format: OutputFormat, arguments: &ScheduleAddArgs) -> Result<()> {
-    let input = input::read_document::<ScheduleInput>(&arguments.file)?;
+    let input = schedule_input(arguments)?;
     let prepared = crate::schedule::prepare(&input)?;
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
@@ -74,6 +97,55 @@ fn add(format: OutputFormat, arguments: &ScheduleAddArgs) -> Result<()> {
         app.store
             .create_schedule(&input, &prepared, arguments.idempotency_key.as_deref())?;
     write_schedule(format, &app.instance_id, &schedule)
+}
+
+fn schedule_input(arguments: &ScheduleAddArgs) -> Result<ScheduleInput> {
+    if let Some(file) = &arguments.file {
+        if arguments.plan_id.is_some()
+            || arguments.immediate
+            || arguments.manual
+            || arguments.at.is_some()
+            || arguments.version.is_some()
+            || arguments.start_deadline_seconds.is_some()
+            || arguments.local_endpoint.is_some()
+            || arguments.after_quota_reset
+        {
+            return Err(ReactorError::InvalidArgument(
+                "--file cannot be combined with simple Schedule arguments".to_owned(),
+            ));
+        }
+        return input::read_document::<ScheduleInput>(file);
+    }
+    let plan_id = arguments.plan_id.clone().ok_or_else(|| {
+        ReactorError::InvalidArgument("plan ID is required without --file".to_owned())
+    })?;
+    let rule_count = usize::from(arguments.immediate)
+        + usize::from(arguments.manual)
+        + usize::from(arguments.at.is_some());
+    if rule_count != 1 {
+        return Err(ReactorError::InvalidArgument(
+            "choose exactly one of --immediate, --manual, or --at".to_owned(),
+        ));
+    }
+    let rule = if arguments.immediate {
+        ScheduleRule::Immediate
+    } else if arguments.manual {
+        ScheduleRule::Manual
+    } else {
+        ScheduleRule::At {
+            local_time: arguments.at.clone().unwrap_or_default(),
+        }
+    };
+    Ok(ScheduleInput {
+        plan_id,
+        plan_version: arguments.version,
+        rule,
+        start_deadline_seconds: arguments
+            .start_deadline_seconds
+            .unwrap_or(DEFAULT_DEADLINE_SECONDS),
+        local_endpoint: arguments.local_endpoint.clone(),
+        after_quota_reset: arguments.after_quota_reset,
+    })
 }
 
 fn show(format: OutputFormat, arguments: &ScheduleIdArgs) -> Result<()> {
