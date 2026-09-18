@@ -9,3 +9,8 @@
 ## Testing
 
 - Do not create, modify, or run tests unless the user explicitly requests it.
+
+## Versioning
+
+- Increment the patch version for every bug fix.
+- Add one Korean line for each fix under its version in `PATCH_NOTES.md`.
