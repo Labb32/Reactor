@@ -10,6 +10,8 @@ Initialize local configuration and storage.
 reactor init
 ```
 
+Initialization registers and starts the per-user daemon. Use `reactor init --no-autostart` to initialize data only.
+
 Register a project and verify Codex readiness.
 
 ```shell
@@ -79,9 +81,12 @@ reactor run list
 reactor run cancel <run-id>
 reactor run retry <run-id>
 reactor snapshot
+reactor service status
 ```
 
 Only the latest diff is retained for each Workspace. `run show` reports the latest Attempt log path.
+
+Use `reactor service install|start|stop|status|uninstall` to manage login startup. `service uninstall` keeps configuration, schedules, logs, and results. `reactor daemon run` runs the scheduler directly in the foreground.
 
 ## Automation
 

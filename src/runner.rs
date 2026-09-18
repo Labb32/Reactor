@@ -26,9 +26,18 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const STOP_GRACE_PERIOD: Duration = Duration::from_secs(3);
 
 pub fn execute_next(paths: &ReactorPaths, app: &mut App) -> Result<Option<RunRecord>> {
+    prepare_execution(paths, app)?;
+    execute_available(paths, app)
+}
+
+pub(crate) fn prepare_execution(paths: &ReactorPaths, app: &mut App) -> Result<()> {
     recover(paths, app)?;
     let runs_dir = paths.data_dir.join("runs");
     run_log::prune(&runs_dir).map_err(|source| io_error(&runs_dir, source))?;
+    Ok(())
+}
+
+pub(crate) fn execute_available(paths: &ReactorPaths, app: &mut App) -> Result<Option<RunRecord>> {
     let owner_id = crate::ids::new_id();
     let Some(claimed) = app
         .store
@@ -450,7 +459,8 @@ fn prepare(
         || plan.workspace_id != run.workspace_id
         || plan.agent.as_str() != run.agent_kind
         || plan.limits.max_wall_time_seconds != run.limits.max_wall_time_seconds
-        || plan.limits.max_attempts != run.limits.max_attempts
+        || plan.limits.max_attempts < run.limits.max_attempts
+        || plan.limits.max_tokens != run.limits.max_tokens
     {
         return Ok(Preparation::ReviewRequired("run_plan_mismatch".to_owned()));
     }

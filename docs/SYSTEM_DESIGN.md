@@ -229,6 +229,8 @@ DB File과 Docker Socket은 외부 서비스에 노출하지 않는다. 인증, 
 
 `reactor service install|start|stop|status|uninstall`로 등록과 상태를 관리한다. 등록 실패 시 데이터 초기화 결과와 실패 원인을 함께 보고하며 성공으로 숨기지 않는다. daemon은 Instance Lock으로 중복 실행을 막는다.
 
+Instance Lock은 Data Directory의 파일에 OS 잠금을 유지한다. PID 문자열은 진단용이며 잠금 소유권 판단에는 사용하지 않는다. daemon은 시작 시 복구와 로그 정리를 한 번 수행한 뒤 `global` 한도만큼 Worker를 실행하며, 실제 선점은 기존 SQLite 동시성 계약을 따른다.
+
 Agent 인증과 Workspace 권한을 그대로 사용하기 위해 관리자 권한과 별도 System Account를 요구하지 않는다. 따라서 자동 시작 기준은 장치 부팅이 아니라 해당 사용자의 로그인이다. 로그인 전 실행이 필요한 System Service는 v1 범위에서 제외한다.
 
 ## 구현 순서

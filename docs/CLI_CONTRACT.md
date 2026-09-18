@@ -45,6 +45,18 @@ Reactor commands use text output by default. Automation should pass `--output js
 
 JSON responses go to stdout. Human diagnostics go to stderr.
 
+## Initialization and daemon
+
+```shell
+reactor init [--file <config.json|yaml>] [--no-autostart]
+reactor daemon run [--config-dir <path> --data-dir <path>]
+reactor service install|start|stop|status|uninstall
+```
+
+By default, `init` registers the current executable for user login and starts the daemon. `--no-autostart` initializes configuration and storage without changing service registration. Service registration is scoped by Reactor instance ID and uses Task Scheduler on Windows, `systemd --user` on Linux, and a LaunchAgent on macOS; it never requires a system account or administrator registration.
+
+The daemon uses an OS file lock to reject duplicate instances and runs up to the configured global concurrency. Concurrency values accept `1..=64`. Restart recovery changes interrupted Runs to `REVIEW_REQUIRED` and preserves their logs and pending diff. `service uninstall` stops and removes login startup without deleting Reactor data.
+
 ## Input
 
 Commands that accept a document use `--file <path>` or `--file -` for stdin. `.json`, `.yaml`, and `.yml` are recognized; stdin and unknown extensions try JSON followed by YAML.

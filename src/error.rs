@@ -39,7 +39,7 @@ pub enum ReactorError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
-    #[error("configuration value {field} must be greater than zero")]
+    #[error("configuration value {field} must be between 1 and 64")]
     InvalidConcurrency { field: &'static str },
 
     #[error("database error: {0}")]
@@ -53,6 +53,23 @@ pub enum ReactorError {
 
     #[error("database schema {found} must be migrated to schema {supported}")]
     SchemaMigrationRequired { found: u32, supported: u32 },
+
+    #[error("Reactor daemon is already running")]
+    DaemonAlreadyRunning,
+
+    #[error("service {operation} failed: {message}")]
+    ServiceOperation {
+        operation: &'static str,
+        message: String,
+    },
+
+    #[error("Reactor was initialized, but automatic startup failed: {source}")]
+    InitializationService {
+        config_file: PathBuf,
+        database_file: PathBuf,
+        #[source]
+        source: Box<ReactorError>,
+    },
 
     #[error("event cursor {requested} has expired; the oldest available cursor is {oldest}")]
     CursorExpired { requested: i64, oldest: i64 },
@@ -177,6 +194,7 @@ impl ReactorError {
             | Self::SchemaMigrationRequired { .. } => 3,
             Self::CursorExpired { .. }
             | Self::IdempotencyConflict
+            | Self::DaemonAlreadyRunning
             | Self::InvalidRunTransition { .. }
             | Self::RunNotFound(_)
             | Self::WorkspaceOverlap { .. }
@@ -198,6 +216,7 @@ impl ReactorError {
             | Self::OutputSerialization(_)
             | Self::InvalidStoredData(_)
             | Self::Database(_) => 1,
+            Self::ServiceOperation { .. } | Self::InitializationService { .. } => 1,
         }
     }
 
@@ -216,6 +235,9 @@ impl ReactorError {
             Self::UnsupportedSchema { .. } => "unsupported_schema",
             Self::UninitializedDatabase => "uninitialized_database",
             Self::SchemaMigrationRequired { .. } => "schema_migration_required",
+            Self::DaemonAlreadyRunning => "daemon_already_running",
+            Self::ServiceOperation { .. } => "service_operation_failed",
+            Self::InitializationService { .. } => "initialization_service_failed",
             Self::CursorExpired { .. } => "cursor_expired",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::InvalidRunTransition { .. } => "invalid_run_transition",
@@ -251,6 +273,18 @@ impl ReactorError {
             Self::CursorExpired { requested, oldest } => {
                 serde_json::json!({ "requested": requested, "oldest": oldest })
             }
+            Self::ServiceOperation { operation, .. } => {
+                serde_json::json!({ "operation": operation })
+            }
+            Self::InitializationService {
+                config_file,
+                database_file,
+                ..
+            } => serde_json::json!({
+                "initialized": true,
+                "config_file": config_file,
+                "database_file": database_file
+            }),
             Self::InvalidRunTransition { from, to } => {
                 serde_json::json!({ "from": from, "to": to })
             }

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ReactorError, Result, io_error};
 
+const MAX_CONCURRENCY: u16 = 64;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -67,7 +69,7 @@ impl Config {
         ];
 
         for (field, value) in values {
-            if value == 0 {
+            if !(1..=MAX_CONCURRENCY).contains(&value) {
                 return Err(ReactorError::InvalidConcurrency { field });
             }
         }

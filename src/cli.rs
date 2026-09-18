@@ -3,10 +3,12 @@ use std::{process::ExitCode, thread, time::Duration};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
+mod daemon;
 mod plans;
 mod queue;
 mod runs;
 mod schedules;
+mod services;
 mod workspaces;
 
 use crate::{
@@ -32,7 +34,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Initialize Reactor's configuration and local database.
-    Init(InputArgs),
+    Init(InitArgs),
+    /// Run the background scheduler.
+    Daemon(daemon::DaemonArgs),
+    /// Manage user login startup.
+    Service(services::ServiceArgs),
     /// Show version, instance, and capability information.
     Info,
     /// Show the current workspace, queue, and run state.
@@ -52,10 +58,14 @@ enum Command {
 }
 
 #[derive(Debug, Args)]
-struct InputArgs {
+struct InitArgs {
     /// Read JSON or YAML from a file, or use - for stdin.
     #[arg(long, value_name = "PATH")]
     file: Option<String>,
+
+    /// Initialize data without registering automatic startup.
+    #[arg(long)]
+    no_autostart: bool,
 }
 
 #[derive(Debug, Args)]
@@ -75,6 +85,8 @@ struct InitializationData {
     config_file: String,
     database_file: String,
     database_schema_version: u32,
+    autostart: bool,
+    service: Option<crate::service::ServiceStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,11 +111,16 @@ const CAPABILITIES: &[&str] = &[
     "run_results",
     "workspace_diff",
     "interrupted_run_recovery",
+    "recurring_schedules",
+    "daemon",
+    "user_autostart",
 ];
 
 fn execute(cli: &Cli) -> Result<()> {
     match &cli.command {
         Command::Init(arguments) => initialize(cli.output, arguments),
+        Command::Daemon(arguments) => daemon::execute(arguments),
+        Command::Service(arguments) => services::execute(cli.output, arguments),
         Command::Info => info(cli.output),
         Command::Snapshot => snapshot(cli.output),
         Command::Events(arguments) => events(cli.output, arguments),
@@ -115,17 +132,32 @@ fn execute(cli: &Cli) -> Result<()> {
     }
 }
 
-fn initialize(format: OutputFormat, arguments: &InputArgs) -> Result<()> {
+fn initialize(format: OutputFormat, arguments: &InitArgs) -> Result<()> {
     let config = arguments
         .file
         .as_deref()
         .map(input::read_document::<Config>)
         .transpose()?;
-    let initialized = App::initialize(ReactorPaths::discover()?, config)?;
+    let paths = ReactorPaths::discover()?;
+    let initialized = App::initialize(paths.clone(), config)?;
+    let service = if arguments.no_autostart {
+        None
+    } else {
+        let started = crate::service::install(&paths, &initialized.instance_id)
+            .and_then(|_| crate::service::start(&paths, &initialized.instance_id))
+            .map_err(|source| ReactorError::InitializationService {
+                config_file: initialized.config_file.clone(),
+                database_file: initialized.database_file.clone(),
+                source: Box::new(source),
+            })?;
+        Some(started)
+    };
     let data = InitializationData {
         config_file: initialized.config_file.display().to_string(),
         database_file: initialized.database_file.display().to_string(),
         database_schema_version: initialized.schema_version,
+        autostart: !arguments.no_autostart,
+        service,
     };
 
     match format {
@@ -134,6 +166,11 @@ fn initialize(format: OutputFormat, arguments: &InputArgs) -> Result<()> {
             println!("config: {}", data.config_file);
             println!("database: {}", data.database_file);
             println!("schema: {}", data.database_schema_version);
+            println!("autostart: {}", data.autostart);
+            if let Some(service) = &data.service {
+                println!("service: {}", service.platform);
+                println!("daemon running: {}", service.running);
+            }
             Ok(())
         }
         OutputFormat::Json | OutputFormat::Jsonl => {
