@@ -3,6 +3,7 @@ use std::{
     path::Path,
     process::{Command, ExitStatus, Stdio},
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -60,8 +61,11 @@ pub(crate) fn execute_available(
     else {
         return Ok(None);
     };
-    let _heartbeat = Heartbeat::start(paths, &claimed.id, &owner_id);
-    execute_claimed(paths, app, &claimed.id, &owner_id, shutdown).map(Some)
+    let heartbeat = Heartbeat::start(paths, &claimed.id, &owner_id);
+    app.store.fence_execution(Some((&claimed.id, &owner_id)));
+    let result = execute_claimed(paths, app, &claimed.id, &owner_id, shutdown, &heartbeat.lost);
+    app.store.fence_execution(None);
+    result.map(Some)
 }
 
 fn execute_claimed(
@@ -70,6 +74,7 @@ fn execute_claimed(
     run_id: &str,
     owner_id: &str,
     shutdown: Option<&AtomicBool>,
+    ownership_lost: &AtomicBool,
 ) -> Result<RunRecord> {
     let execution = app.store.execution_run(run_id)?;
     let workspace = app.store.get_workspace(&execution.record.workspace_id)?;
@@ -101,7 +106,10 @@ fn execute_claimed(
         app.store.release_run(run_id, owner_id)?;
         return Ok(run);
     }
-    let run = execute_prepared(paths, app, execution, workspace, shutdown)?;
+    let run = execute_prepared(paths, app, execution, workspace, shutdown, ownership_lost)?;
+    if ownership_lost.load(Ordering::Acquire) {
+        return Ok(run);
+    }
     record_checkpoint_result(paths, app, &run)
 }
 
@@ -111,9 +119,11 @@ fn execute_prepared(
     execution: ExecutionRun,
     workspace: crate::workspace::WorkspaceRecord,
     shutdown: Option<&AtomicBool>,
+    ownership_lost: &AtomicBool,
 ) -> Result<RunRecord> {
     let run_id = &execution.record.id;
-    if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
+    if ownership_lost.load(Ordering::Acquire)
+        || shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
         return app.store.finish_run(
             run_id,
             None,
@@ -204,6 +214,9 @@ fn execute_prepared(
         }
     };
 
+    if ownership_lost.load(Ordering::Acquire) {
+        return Err(ReactorError::InvalidStoredData("run ownership lost before spawn".to_owned()));
+    }
     let command = process_command(&prepared.command);
     let mut supervisor = match ProcessSupervisor::spawn(command) {
         Ok(supervisor) => supervisor,
@@ -293,6 +306,7 @@ fn execute_prepared(
         started,
         &log_path,
         shutdown,
+        ownership_lost,
     ) {
         Ok(outcome) => outcome,
         Err(_) => {
@@ -317,6 +331,10 @@ fn execute_prepared(
     let flush_result = RunLog::flush(&log);
     let log_failed = captured.is_err() || flush_result.is_err();
     let (stdout, stderr) = captured.unwrap_or_default();
+    if ownership_lost.load(Ordering::Acquire) {
+        // Leave the record and lease for recovery; a former owner must not finalize it.
+        return app.store.get_run(run_id);
+    }
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
     let token_usage = prepared.agent.adapter().token_usage(&stdout);
@@ -369,25 +387,8 @@ fn execute_prepared(
 pub fn recover(paths: &ReactorPaths, app: &mut App) -> Result<Vec<RunRecord>> {
     let owner_id = crate::ids::new_id();
     let mut recovered = app.store.recover_interrupted_runs(&owner_id)?;
-    for run in &recovered {
-        if checkpoint::pending_exists(paths, &run.id) {
-            continue;
-        }
-        if !app.store.claim_run_lease(&run.id, &owner_id)? {
-            continue;
-        }
-        let execution = app.store.execution_run(&run.id)?;
-        let workspace = app.store.get_workspace(&run.workspace_id)?;
-        let roots = execution
-            .policy
-            .write_paths(Path::new(&workspace.canonical_path));
-        let heartbeat = Heartbeat::start(paths, &run.id, &owner_id);
-        let checkpoint = checkpoint::begin(paths, &run.id, &run.workspace_id, &roots);
-        drop(heartbeat);
-        if checkpoint.is_err() {
-            app.store.release_run(&run.id, &owner_id)?;
-        }
-    }
+    // A missing before-manifest cannot be recreated after execution: keep the
+    // result unavailable rather than inventing a misleading empty diff.
     for run_id in checkpoint::pending_run_ids(paths)? {
         let run = match app.store.get_run(&run_id) {
             Ok(run) => run,
@@ -440,6 +441,7 @@ fn record_checkpoint_result(
 }
 
 struct Heartbeat {
+    lost: Arc<AtomicBool>,
     stop: mpsc::Sender<()>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -450,23 +452,35 @@ impl Heartbeat {
         let run_id = run_id.to_owned();
         let owner_id = owner_id.to_owned();
         let (stop, receiver) = mpsc::channel();
+        let lost = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&lost);
         let handle = thread::spawn(move || {
             let Ok(store) = crate::store::Store::open_initialized(&database) else {
+                signal.store(true, Ordering::Release);
                 return;
             };
+            let mut renewed = Instant::now();
             loop {
                 match receiver.recv_timeout(HEARTBEAT_INTERVAL) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
                 match store.heartbeat_run(&run_id, &owner_id) {
-                    Ok(true) => {}
-                    Ok(false) => break,
-                    Err(_) => continue,
+                    Ok(true) => renewed = Instant::now(),
+                    Ok(false) => {
+                        signal.store(true, Ordering::Release);
+                        break;
+                    }
+                    Err(_) if renewed.elapsed() < Duration::from_secs(45) => continue,
+                    Err(_) => {
+                        signal.store(true, Ordering::Release);
+                        break;
+                    }
                 }
             }
         });
         Self {
+            lost,
             stop,
             handle: Some(handle),
         }
@@ -668,9 +682,11 @@ fn monitor(
     started: Instant,
     log_path: &Path,
     shutdown: Option<&AtomicBool>,
+    ownership_lost: &AtomicBool,
 ) -> Result<ProcessOutcome> {
     loop {
-        if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
+        if ownership_lost.load(Ordering::Acquire)
+            || shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
             let status = supervisor
                 .stop(STOP_GRACE_PERIOD)
                 .map_err(|source| io_error(log_path, source))?;

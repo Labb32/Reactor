@@ -17,7 +17,7 @@ mod workspaces;
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 9;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_COUNT: i64 = 100_000;
-const RUN_LEASE_DURATION: &str = "+30 seconds";
+const RUN_LEASE_DURATION: &str = "+60 seconds";
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
@@ -55,13 +55,14 @@ pub struct AuditEvent {
 
 pub struct Store {
     connection: Connection,
+    execution_fence: Option<(String, String)>,
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         configure_connection(&connection)?;
-        Ok(Self { connection })
+        Ok(Self { connection, execution_fence: None })
     }
 
     pub fn open_initialized(path: &Path) -> Result<Self> {
@@ -71,7 +72,7 @@ impl Store {
         }
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         configure_connection(&connection)?;
-        let store = Self { connection };
+        let store = Self { connection, execution_fence: None };
         store.ensure_supported_schema()?;
         configure_storage(&store.connection)?;
         Ok(store)
@@ -280,9 +281,24 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((run_id, owner_id)) = &self.execution_fence {
+            let owned: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run'
+                 AND resource_id = ?1 AND owner_id = ?2
+                 AND julianday(expires_at) > julianday('now'))",
+                params![run_id, owner_id], |row| row.get(0),
+            )?;
+            if !owned {
+                return Err(ReactorError::InvalidStoredData("run ownership lost".to_owned()));
+            }
+        }
         let result = operation(&transaction)?;
         transaction.commit()?;
         Ok(result)
+    }
+
+    pub(crate) fn fence_execution(&mut self, owner: Option<(&str, &str)>) {
+        self.execution_fence = owner.map(|(run, owner)| (run.to_owned(), owner.to_owned()));
     }
 }
 

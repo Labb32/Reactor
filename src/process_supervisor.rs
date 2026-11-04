@@ -7,6 +7,11 @@ use std::{
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Fail closed: a PID/group that is alive or inaccessible is not safe to recover.
+pub fn process_absent(process_id: u32) -> bool {
+    platform::process_absent(process_id)
+}
+
 pub struct ProcessSupervisor {
     child: Child,
     containment: platform::Containment,
@@ -100,6 +105,19 @@ mod platform {
 
     use libc::{ESRCH, SIGKILL, SIGTERM, kill};
 
+    pub fn process_absent(process_id: u32) -> bool {
+        let Ok(pid) = i32::try_from(process_id) else { return false; };
+        if pid <= 0 { return false; }
+        // SAFETY: Signal zero probes existence without changing either process/group.
+        for target in [pid, -pid] {
+            if unsafe { kill(target, 0) } == 0
+                || io::Error::last_os_error().raw_os_error() != Some(ESRCH) {
+                return false;
+            }
+        }
+        true
+    }
+
     pub struct Containment {
         process_id: Cell<Option<u32>>,
     }
@@ -108,6 +126,22 @@ mod platform {
         use std::os::unix::process::CommandExt;
 
         command.process_group(0);
+        #[cfg(target_os = "linux")]
+        {
+            let parent = std::process::id() as libc::pid_t;
+            // SAFETY: Only async-signal-safe syscalls are used between fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, SIGKILL) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::getppid() != parent {
+                        return Err(io::Error::other("supervisor exited during spawn"));
+                    }
+                    Ok(())
+                });
+            }
+        }
     }
 
     impl Containment {
@@ -183,6 +217,18 @@ mod platform {
 
     pub struct Containment {
         job: HANDLE,
+    }
+
+    pub fn process_absent(process_id: u32) -> bool {
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+        // SAFETY: Only synchronization access is requested; no process is signalled.
+        let handle = unsafe { OpenProcess(0x00100000, 0, process_id) };
+        if handle.is_null() {
+            return io::Error::last_os_error().raw_os_error() == Some(87);
+        }
+        let stopped = unsafe { WaitForSingleObject(handle, 0) } == 0;
+        unsafe { CloseHandle(handle); }
+        stopped
     }
 
     pub fn prepare(command: &mut Command) {
@@ -262,6 +308,8 @@ mod platform {
     use std::{io, process::Command};
 
     pub struct Containment;
+
+    pub fn process_absent(_process_id: u32) -> bool { false }
 
     pub fn prepare(_command: &mut Command) {}
 

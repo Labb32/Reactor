@@ -255,7 +255,8 @@ impl Store {
         self.ensure_supported_schema()?;
         Ok(self.connection.execute(
             "UPDATE leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3)
-             WHERE resource_type = 'run' AND resource_id = ?1 AND owner_id = ?2",
+             WHERE resource_type = 'run' AND resource_id = ?1 AND owner_id = ?2
+               AND julianday(expires_at) > julianday('now')",
             params![run_id, owner_id, super::RUN_LEASE_DURATION],
         )? == 1)
     }
@@ -474,6 +475,11 @@ impl Store {
             let mut recovered = Vec::with_capacity(ids.len());
             for run_id in ids {
                 let run = query_run(transaction, &run_id)?;
+                if run.attempt.as_ref().and_then(|attempt| attempt.process_id)
+                    .is_some_and(|pid| !crate::process_supervisor::process_absent(pid)) {
+                    // Keep PREPARING/RUNNING reserved until process absence is proven.
+                    continue;
+                }
                 let now = crate::time::now_utc();
                 transaction.execute(
                     "UPDATE runs SET state = 'REVIEW_REQUIRED', updated_at = ?1 WHERE id = ?2",
