@@ -36,6 +36,8 @@ enum RunCommand {
     Cancel(RunMutationArgs),
     /// Queue a new run from a retryable terminal run.
     Retry(RunMutationArgs),
+    /// Acknowledge Task warnings and continue the same Plan occurrence.
+    Continue(RunIdArgs),
     /// Delete a completed run and its logs.
     Clear(RunClearArgs),
 }
@@ -101,6 +103,16 @@ pub(super) fn execute(format: OutputFormat, arguments: &RunArgs) -> Result<()> {
         RunCommand::List(arguments) => list(format, arguments),
         RunCommand::Cancel(arguments) => cancel(format, arguments),
         RunCommand::Retry(arguments) => retry(format, arguments),
+        RunCommand::Continue(arguments) => {
+            let paths = ReactorPaths::discover()?;
+            let mut app = App::open(&paths)?;
+            let run = resolve_run(&app, &arguments.run_id)?;
+            let run = app.store.continue_tasks(&run.id)?;
+            match format {
+                OutputFormat::Text => { println!("{} {}", run.id, run.state); Ok(()) },
+                OutputFormat::Json | OutputFormat::Jsonl => output::write_json(&Envelope::new(app.instance_id, run)),
+            }
+        },
         RunCommand::Clear(arguments) => clear(format, arguments),
     }
 }

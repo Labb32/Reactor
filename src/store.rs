@@ -12,6 +12,7 @@ mod plans;
 mod queue;
 mod runs;
 mod schedules;
+mod tasks;
 mod workspaces;
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 10;

@@ -80,7 +80,8 @@ fn execute_claimed(
     shutdown: Option<&AtomicBool>,
     ownership_lost: &AtomicBool,
 ) -> Result<RunRecord> {
-    let execution = app.store.execution_run(run_id)?;
+    app.store.initialize_tasks(run_id)?;
+    let mut execution = app.store.execution_run(run_id)?;
     let workspace = app.store.get_workspace(&execution.record.workspace_id)?;
     let runtime = match runtime_workspace(paths, &workspace, &execution.policy) {
         Ok(runtime) => runtime,
@@ -97,9 +98,17 @@ fn execute_claimed(
             return Ok(run);
         }
     };
-    let roots = runtime.policy.write_paths(&runtime.canonical.path);
-    let _locks = crate::workspace_execution::WorkspaceLocks::acquire(&roots)?;
-    if checkpoint::begin(paths, run_id, &execution.record.workspace_id, &roots).is_err() {
+    let original_roots = runtime.policy.write_paths(&runtime.canonical.path);
+    let _locks = crate::workspace_execution::WorkspaceLocks::acquire(&original_roots)?;
+    if !execution.record.tasks.is_empty() && execution.record.execution_path.is_none() {
+        let path = crate::workspace_execution::prepare_worktree(paths, run_id, &runtime.canonical.path)?;
+        app.store.set_execution_path(run_id, &path.to_string_lossy())?;
+        execution = app.store.execution_run(run_id)?;
+    }
+    let execution_root = execution.record.execution_path.as_deref().map(Path::new).unwrap_or(&runtime.canonical.path);
+    let roots = runtime.policy.write_paths(execution_root);
+    if !checkpoint::pending_exists(paths, run_id)
+        && checkpoint::begin(paths, run_id, &execution.record.workspace_id, &roots).is_err() {
         let run = app.store.finish_run(
             run_id,
             None,
@@ -111,8 +120,17 @@ fn execute_claimed(
         app.store.release_run(run_id, owner_id)?;
         return Ok(run);
     }
-    let run = execute_prepared(paths, app, execution, workspace, shutdown, ownership_lost)?;
+    let run = loop {
+        crate::execution_control::set_timeout(Some(Duration::from_secs(600)));
+        let run = execute_prepared(paths, app, execution, workspace.clone(), shutdown, ownership_lost)?;
+        if run.state != "PREPARING" || ownership_lost.load(Ordering::Acquire) { break run; }
+        execution = app.store.execution_run(run_id)?;
+    };
     if ownership_lost.load(Ordering::Acquire) {
+        return Ok(run);
+    }
+    if run.tasks.iter().any(|task| task.state == "WAITING_REVIEW") {
+        app.store.release_run(run_id, owner_id)?;
         return Ok(run);
     }
     crate::execution_control::set_timeout(Some(Duration::from_secs(60)));
@@ -153,7 +171,10 @@ fn execute_prepared(
         &execution.record.plan_id,
         Some(execution.record.plan_version),
     )?;
-    let prepared = match prepare(
+    if !plan.version.tasks.is_empty() && execution.record.task_index as usize >= plan.version.tasks.len() {
+        return app.store.finish_run(run_id, None, RunState::Preparing, RunState::Succeeded, None, "tasks_acknowledged");
+    }
+    let mut prepared = match prepare(
         paths,
         &execution.record,
         &execution.policy,
@@ -177,6 +198,13 @@ fn execute_prepared(
             RunState::ReviewRequired, None, &format!("preparation_stopped: {error}"));
     }
     crate::execution_control::set_timeout(None);
+    if let Some(path) = &execution.record.execution_path {
+        let root = Path::new(path);
+        crate::workspace_execution::validate_policy_files(
+            Path::new(&workspace.canonical_path), root, prepared.agent.adapter().policy_files(),
+        )?;
+        prepared.command = prepared.agent.adapter().command(root, &execution.policy, plan.version.model.as_deref())?;
+    }
 
     let attempt_id = crate::ids::new_id();
     let log_path = paths
@@ -385,6 +413,21 @@ fn execute_prepared(
         StopReason::Exited if outcome.status.success() => (RunState::Succeeded, "completed"),
         StopReason::Exited => (RunState::Failed, "agent_exit"),
     };
+    if !plan.version.tasks.is_empty() {
+        let (response, warnings, blocking) = task_result(&stdout);
+        let pause = next == RunState::Succeeded && (blocking
+            || (plan.version.tasks[execution.record.task_index as usize].pause_on_warnings && !warnings.is_empty()));
+        app.store.record_task_outcome(run_id,
+            if pause { "WAITING_REVIEW" } else if next == RunState::Succeeded { "SUCCEEDED" } else { next.as_str() },
+            &warnings, &response)?;
+        if pause {
+            return app.store.finish_run(run_id, Some(&attempt.id), RunState::Running,
+                RunState::ReviewRequired, outcome.status.code(), "task_warning_review");
+        }
+        if next == RunState::Succeeded && (execution.record.task_index as usize + 1) < plan.version.tasks.len() {
+            return app.store.advance_task(run_id, &attempt.id, outcome.status.code());
+        }
+    }
     app.store.finish_run(
         run_id,
         Some(&attempt.id),
@@ -409,6 +452,7 @@ pub fn recover(paths: &ReactorPaths, app: &mut App) -> Result<Vec<RunRecord>> {
             }
             Err(error) => return Err(error),
         };
+        if run.tasks.iter().any(|task| task.state == "WAITING_REVIEW") { continue; }
         if run.result.is_some() {
             checkpoint::complete(paths, &run_id)?;
             continue;
@@ -632,7 +676,7 @@ fn prepare(
     Ok(Preparation::Ready(PreparedRun {
         agent,
         command,
-        prompt: execution_prompt(plan),
+        prompt: execution_prompt(plan, run.task_index),
         timeout: Duration::from_secs(run.limits.max_wall_time_seconds),
     }))
 }
@@ -778,11 +822,14 @@ fn join_input(handle: thread::JoinHandle<std::io::Result<()>>) -> std::io::Resul
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "agent input close timed out"))?
 }
 
-fn execution_prompt(plan: &PlanVersionRecord) -> String {
+fn execution_prompt(plan: &PlanVersionRecord, task_index: u32) -> String {
     let mut prompt = format!(
         "Execute the reviewed task below. Work autonomously within the configured sandbox. Do not request interactive approval.\n\n<task>\n{}\n</task>",
         plan.context
     );
+    if let Some(task) = plan.tasks.get(task_index as usize) {
+        prompt.push_str(&format!("\n\n<current_task id=\"{}\">\n{}\n</current_task>\nExecute only this Task. Files from previous Tasks are already present. In your final response, optionally report warnings as JSON: {{\"reactor_task_result\":{{\"warnings\":[{{\"level\":\"info\",\"message\":\"description\"}}]}}}}. Use level blocking when operator review is required. Do not claim business correctness on behalf of the scheduler.", task.id, task.context));
+    }
     if !plan.completion_criteria.is_empty() {
         prompt.push_str("\n\n<completion_criteria>\n");
         for (index, criterion) in plan.completion_criteria.iter().enumerate() {
@@ -791,4 +838,34 @@ fn execution_prompt(plan: &PlanVersionRecord) -> String {
         prompt.push_str("</completion_criteria>");
     }
     prompt
+}
+
+fn task_result(stdout: &str) -> (String, Vec<String>, bool) {
+    let mut response = String::new();
+    let mut report = None;
+    for line in stdout.lines() {
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+            if event["type"] == "item.completed" && event["item"]["type"] == "agent_message" {
+                if let Some(text) = event["item"]["text"].as_str() { response = text.to_owned(); }
+            }
+            if event.get("reactor_task_result").is_some() { report = Some(event); }
+        }
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) {
+        if value.get("reactor_task_result").is_some() { report = Some(value); }
+    }
+    let Some(report) = report else { return (response, Vec::new(), false); };
+    let Some(items) = report["reactor_task_result"]["warnings"].as_array() else {
+        return (response, vec!["invalid_task_warning_report".to_owned()], true);
+    };
+    let mut warnings = Vec::new();
+    let mut blocking = false;
+    for warning in items.iter().take(100) {
+        let level = warning["level"].as_str().unwrap_or("unknown");
+        let message = warning["message"].as_str().unwrap_or("invalid_warning_message");
+        blocking |= level != "info" || warning["message"].as_str().is_none();
+        warnings.push(format!("{level}: {}", message.chars().take(2000).collect::<String>()));
+    }
+    if items.len() > 100 { blocking = true; warnings.push("warning_report_truncated".to_owned()); }
+    (response, warnings, blocking)
 }

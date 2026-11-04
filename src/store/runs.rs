@@ -159,7 +159,11 @@ impl Store {
                 [run_id],
                 |row| row.get(0),
             )?;
-            if attempts >= run.limits.max_attempts {
+            let task_attempts: u32 = transaction.query_row(
+                "SELECT COUNT(*) FROM attempts WHERE run_id = ?1 AND task_index = ?2",
+                params![run_id, run.task_index], |row| row.get(0),
+            )?;
+            if task_attempts >= run.limits.max_attempts {
                 return Ok(BeginAttempt::LimitReached);
             }
             let attempt = AttemptRecord {
@@ -177,16 +181,19 @@ impl Store {
             };
             transaction.execute(
                 "INSERT INTO attempts
-                 (id, run_id, attempt_number, started_at, log_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (id, run_id, attempt_number, started_at, log_path, task_index)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     attempt.id,
                     run_id,
                     attempt.attempt_number,
                     attempt.started_at,
-                    attempt.log_path
+                    attempt.log_path,
+                    run.task_index
                 ],
             )?;
+            transaction.execute("UPDATE run_tasks SET state = 'RUNNING', updated_at = ?1 WHERE run_id = ?2 AND task_index = ?3",
+                params![attempt.started_at, run_id, run.task_index])?;
             write_event(
                 transaction,
                 "RUN_ATTEMPT_CREATED",
@@ -357,6 +364,7 @@ impl Store {
                 }),
                 &now,
             )?;
+            if reason != "task_warning_review" {
             super::schedules::finish_recurring_run(
                 transaction,
                 current.occurrence_id.as_deref(),
@@ -364,6 +372,7 @@ impl Store {
                 now.parse::<jiff::Timestamp>()
                     .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?,
             )?;
+            }
             query_run(transaction, run_id)
         })
     }
@@ -541,6 +550,10 @@ pub(super) fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunR
     let state = parse_state(&run.state)?;
     let now = crate::time::now_utc();
     match state {
+        RunState::ReviewRequired if run.tasks.iter().any(|task| task.state == "WAITING_REVIEW") => {
+            transaction.execute("UPDATE runs SET state = 'CANCELLED', cancel_requested_at = ?1, updated_at = ?1 WHERE id = ?2", params![now, run_id])?;
+            transaction.execute("UPDATE run_tasks SET state = 'CANCELLED', updated_at = ?1 WHERE run_id = ?2 AND state IN ('WAITING', 'WAITING_REVIEW')", params![now, run_id])?;
+        }
         RunState::Waiting | RunState::Queued => {
             let changed = transaction.execute(
                 "UPDATE runs SET state = 'CANCELLED', cancel_requested_at = ?1, updated_at = ?1
@@ -602,6 +615,15 @@ pub(super) fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunR
 
 fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
     let source = query_run(transaction, run_id)?;
+    if source.tasks.iter().any(|task| task.state == "WAITING_REVIEW") {
+        return Err(ReactorError::InvalidArgument("acknowledge task warnings with run continue".to_owned()));
+    }
+    let finalizing: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = ?1)", [run_id], |row| row.get(0),
+    )?;
+    if finalizing || source.attempt.as_ref().is_some_and(|attempt| attempt.ended_at.is_none()) {
+        return Err(ReactorError::InvalidArgument("execution or result recovery is still active".to_owned()));
+    }
     let state = parse_state(&source.state)?;
     if !matches!(
         state,
@@ -624,8 +646,8 @@ fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
         ));
     }
     let used_attempts: u32 = transaction.query_row(
-        "SELECT COUNT(*) FROM attempts WHERE run_id = ?1",
-        [run_id],
+        "SELECT COUNT(*) FROM attempts WHERE run_id = ?1 AND task_index = ?2",
+        params![run_id, source.task_index],
         |row| row.get(0),
     )?;
     if used_attempts >= source.limits.max_attempts {
@@ -644,7 +666,7 @@ fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
          (id, workspace_id, plan_id, plan_version, occurrence_id, retry_of, state, agent_kind,
           provider, local_endpoint, policy_snapshot_json, limits_snapshot_json,
           ready_at, created_at, updated_at)
-         SELECT ?1, workspace_id, plan_id, plan_version, NULL, ?4, 'QUEUED', agent_kind,
+         SELECT ?1, workspace_id, plan_id, plan_version, occurrence_id, ?4, 'QUEUED', agent_kind,
                 provider, local_endpoint, policy_snapshot_json, ?2,
                 ?3, ?3, ?3
          FROM runs WHERE id = ?4 AND state = ?5",
@@ -654,6 +676,15 @@ fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
         return Err(ReactorError::InvalidStoredData(
             "retry source changed unexpectedly".to_owned(),
         ));
+    }
+    transaction.execute("UPDATE runs SET task_index = ?1, execution_path = ?2 WHERE id = ?3",
+        params![source.task_index, source.execution_path, new_run_id])?;
+    transaction.execute("INSERT INTO run_tasks (run_id, task_index, task_id, state, warnings_json, response, updated_at)
+        SELECT ?1, task_index, task_id, CASE WHEN task_index >= ?2 THEN 'WAITING' ELSE state END,
+               warnings_json, response, ?3 FROM run_tasks WHERE run_id = ?4",
+        params![new_run_id, source.task_index, now, run_id])?;
+    if let Some(occurrence) = &source.occurrence_id {
+        transaction.execute("UPDATE schedule_occurrences SET run_id = ?1 WHERE id = ?2", params![new_run_id, occurrence])?;
     }
     write_event(
         transaction,
@@ -667,9 +698,9 @@ fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
 }
 
 fn allocate_retry_id(transaction: &Transaction<'_>, source_id: &str) -> Result<String> {
-    let base = format!("{source_id}-retry");
-    for number in 1_u32..=u32::MAX {
-        let id = format!("{base}-{number}");
+    let _ = source_id;
+    for _ in 0..16 {
+        let id = crate::ids::new_id();
         if !run_id_reserved(transaction, &id)? {
             return Ok(id);
         }
@@ -720,7 +751,7 @@ fn clear_run(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
     Ok(run)
 }
 
-fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
+pub(super) fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
     struct StoredRun {
         workspace_id: String,
         plan_id: String,
@@ -770,6 +801,9 @@ fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
     let limits = serde_json::from_str::<PlanLimits>(&stored.limits_json)
         .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
     Ok(RunRecord {
+        task_index: connection.query_row("SELECT task_index FROM runs WHERE id = ?1", [run_id], |row| row.get(0))?,
+        execution_path: connection.query_row("SELECT execution_path FROM runs WHERE id = ?1", [run_id], |row| row.get(0))?,
+        tasks: super::tasks::query_tasks(connection, run_id)?,
         id: run_id.to_owned(),
         workspace_id: stored.workspace_id,
         plan_id: stored.plan_id,

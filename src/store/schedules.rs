@@ -249,7 +249,8 @@ fn stop_schedule(transaction: &Transaction<'_>, schedule_id: &str) -> Result<Sch
             "SELECT r.id FROM runs r
              JOIN schedule_occurrences so ON so.id = r.occurrence_id
              WHERE so.schedule_id = ?1
-               AND r.state IN ('WAITING', 'QUEUED', 'PREPARING', 'RUNNING')",
+               AND (r.state IN ('WAITING', 'QUEUED', 'PREPARING', 'RUNNING')
+                    OR EXISTS(SELECT 1 FROM run_tasks WHERE run_id = r.id AND state = 'WAITING_REVIEW'))",
         )?;
         let rows = statement.query_map([schedule_id], |row| row.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -381,6 +382,8 @@ fn expire_queued_runs(transaction: &Transaction<'_>, now: &str) -> Result<usize>
          FROM runs r
          JOIN schedule_occurrences so ON so.id = r.occurrence_id
          WHERE r.state = 'QUEUED' AND so.state = 'QUEUED'
+           AND r.task_index = 0 AND r.retry_of IS NULL
+           AND NOT EXISTS (SELECT 1 FROM attempts WHERE run_id = r.id)
            AND so.deadline_at IS NOT NULL
            AND julianday(so.deadline_at) < julianday(?1)
          ORDER BY julianday(so.deadline_at), r.rowid",
@@ -489,6 +492,19 @@ fn materialize_occurrence(
 
     let plan =
         super::plans::query_plan(transaction, &schedule.plan_id, Some(schedule.plan_version))?;
+    let overlap: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE plan_id = ?1
+         AND (state IN ('WAITING', 'QUEUED', 'PREPARING', 'RUNNING')
+         OR EXISTS(SELECT 1 FROM run_tasks WHERE run_id = runs.id AND state = 'WAITING_REVIEW')))",
+        [&schedule.plan_id], |row| row.get(0),
+    )?;
+    if overlap {
+        transaction.execute("UPDATE schedule_occurrences SET state = 'MISSED' WHERE id = ?1", [occurrence_id])?;
+        write_event(transaction, "SCHEDULE_OCCURRENCE_SKIPPED_OVERLAP", "schedule", schedule_id,
+            serde_json::json!({"occurrence_id": occurrence_id, "reason": "unfinished_plan_occurrence"}), &now_text)?;
+        advance_schedule(transaction, &schedule, now)?;
+        return Ok(());
+    }
     let run_id = allocate_run_id(transaction)?;
     transaction.execute(
         "INSERT INTO runs
@@ -644,7 +660,7 @@ pub(super) fn finish_recurring_run(
         return Ok(());
     }
     if !succeeded {
-        return complete_schedule(transaction, &schedule_id, &completed_at.to_string());
+        return Ok(());
     }
     let next = crate::schedule::interval_after_success(&schedule.rule, completed_at)?
         .ok_or_else(|| ReactorError::InvalidStoredData("success interval is missing".to_owned()))?;

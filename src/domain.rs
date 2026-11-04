@@ -77,7 +77,7 @@ impl RunState {
                 )
                 | (
                     Self::Preparing,
-                    Self::Running
+                    Self::Succeeded | Self::Running
                         | Self::Failed
                         | Self::Cancelled
                         | Self::LimitReached

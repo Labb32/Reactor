@@ -259,6 +259,9 @@ fn validate_input(input: &PlanInput) -> Result<()> {
     if input.tasks.len() > 100 {
         return Err(ReactorError::InvalidPlan("at most 100 sequential tasks are supported".to_owned()));
     }
+    if !input.tasks.is_empty() && !matches!(input.agent, AgentKind::Codex) {
+        return Err(ReactorError::InvalidPlan("sequential task execution currently requires Codex".to_owned()));
+    }
     let mut ids = std::collections::HashSet::new();
     let mut total_context = input.context.len();
     for task in &input.tasks {

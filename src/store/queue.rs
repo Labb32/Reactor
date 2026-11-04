@@ -154,6 +154,7 @@ fn query_active_runs(connection: &Connection) -> Result<Vec<QueueRun>> {
         "SELECT id, workspace_id, state, agent_kind, provider, local_endpoint, ready_at, created_at
          FROM runs
          WHERE state IN ('PREPARING', 'RUNNING')
+            OR EXISTS (SELECT 1 FROM run_tasks WHERE run_id = runs.id AND state = 'WAITING_REVIEW')
             OR EXISTS (
                 SELECT 1 FROM leases
                 WHERE resource_type = 'run'

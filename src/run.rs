@@ -29,6 +29,12 @@ pub struct RunRecord {
     #[serde(default)]
     pub retry_of: Option<String>,
     pub state: String,
+    #[serde(default)]
+    pub task_index: u32,
+    #[serde(default)]
+    pub execution_path: Option<String>,
+    #[serde(default)]
+    pub tasks: Vec<RunTaskRecord>,
     pub agent_kind: String,
     pub provider: Option<String>,
     pub local_endpoint: Option<String>,
@@ -39,6 +45,15 @@ pub struct RunRecord {
     pub result: Option<RunResult>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RunTaskRecord {
+    pub index: u32,
+    pub id: String,
+    pub state: String,
+    pub warnings: Vec<String>,
+    pub response: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

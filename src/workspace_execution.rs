@@ -40,6 +40,27 @@ impl Drop for WorkspaceLocks {
     }
 }
 
+pub fn validate_policy_files(original: &Path, execution: &Path, files: &[&str]) -> Result<()> {
+    use std::io::Read;
+    fn read(path: &Path) -> Result<Option<Vec<u8>>> {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error(path, error)),
+        };
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|error| io_error(path, error))?;
+        if bytes.len() > 1024 * 1024 { return Err(ReactorError::InvalidInput("policy file exceeds 1 MiB".to_owned())); }
+        Ok(Some(bytes))
+    }
+    for relative in files {
+        if read(&original.join(relative))? != read(&execution.join(relative))? {
+            return Err(ReactorError::InvalidInput("execution policy files differ from prepared workspace".to_owned()));
+        }
+    }
+    Ok(())
+}
+
 /// Retained for the whole Plan occurrence; no Git publishing is performed here.
 pub fn prepare_worktree(paths: &ReactorPaths, run_id: &str, original: &Path) -> Result<PathBuf> {
     use crate::agents::launcher::BoundedOutput;
