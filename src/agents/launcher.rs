@@ -1,7 +1,7 @@
 use std::{ffi::OsString, process::Command};
 
 /// Bound non-interactive capability/authentication probes and their descendants.
-pub(super) trait BoundedOutput {
+pub(crate) trait BoundedOutput {
     fn bounded_output(&mut self) -> std::io::Result<std::process::Output>;
 }
 

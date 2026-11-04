@@ -24,6 +24,7 @@ mod service;
 mod store;
 mod time;
 mod workspace;
+mod workspace_execution;
 
 use std::process::ExitCode;
 

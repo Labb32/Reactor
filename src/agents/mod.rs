@@ -11,7 +11,7 @@ use crate::{error::Result, workspace::WorkspacePolicy};
 
 mod claude;
 mod codex;
-mod launcher;
+pub(crate) mod launcher;
 mod qwen;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, ValueEnum)]

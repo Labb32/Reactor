@@ -216,6 +216,15 @@ fn insert_workspace(
         if existing_fingerprint == fingerprint {
             return query_workspace(transaction, id);
         }
+        let occupied: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE workspace_id = ?1
+             AND (state IN ('PREPARING', 'RUNNING') OR EXISTS(
+                 SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = runs.id
+             )))", [id], |row| row.get(0),
+        )?;
+        if occupied {
+            return Err(ReactorError::InvalidInput("workspace policy cannot change during execution or recovery".to_owned()));
+        }
         transaction.execute(
             "UPDATE workspaces
              SET status = 'REGISTERED', policy_json = ?1, policy_fingerprint = ?2, updated_at = ?3

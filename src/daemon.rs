@@ -148,12 +148,17 @@ fn lock_path(paths: &ReactorPaths) -> PathBuf {
 }
 
 #[cfg(unix)]
-mod platform {
+pub(crate) mod platform {
     use std::{fs::File, io, os::fd::AsRawFd};
 
     pub fn try_lock(file: &File) -> io::Result<bool> {
+        try_lock_mode(file, true)
+    }
+
+    pub fn try_lock_mode(file: &File, exclusive: bool) -> io::Result<bool> {
         // SAFETY: flock only reads the valid descriptor owned by file.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        let mode = if exclusive { libc::LOCK_EX } else { libc::LOCK_SH };
+        if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } == 0 {
             return Ok(true);
         }
         let error = io::Error::last_os_error();
@@ -178,7 +183,7 @@ mod platform {
 }
 
 #[cfg(windows)]
-mod platform {
+pub(crate) mod platform {
     use std::{fs::File, io, mem::zeroed, os::windows::io::AsRawHandle};
 
     use windows_sys::Win32::{
@@ -190,12 +195,16 @@ mod platform {
     };
 
     pub fn try_lock(file: &File) -> io::Result<bool> {
+        try_lock_mode(file, true)
+    }
+
+    pub fn try_lock_mode(file: &File, exclusive: bool) -> io::Result<bool> {
         // SAFETY: OVERLAPPED is initialized and the file handle remains valid.
         let mut overlapped = unsafe { zeroed::<OVERLAPPED>() };
         let result = unsafe {
             LockFileEx(
                 file.as_raw_handle() as HANDLE,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                (if exclusive { LOCKFILE_EXCLUSIVE_LOCK } else { 0 }) | LOCKFILE_FAIL_IMMEDIATELY,
                 0,
                 1,
                 0,

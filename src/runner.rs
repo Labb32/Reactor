@@ -98,6 +98,7 @@ fn execute_claimed(
         }
     };
     let roots = runtime.policy.write_paths(&runtime.canonical.path);
+    let _locks = crate::workspace_execution::WorkspaceLocks::acquire(&roots)?;
     if checkpoint::begin(paths, run_id, &execution.record.workspace_id, &roots).is_err() {
         let run = app.store.finish_run(
             run_id,
