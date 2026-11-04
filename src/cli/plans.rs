@@ -71,7 +71,7 @@ struct PlanWriteArgs {
     #[arg(long)]
     model: Option<String>,
 
-    #[arg(long)]
+    #[arg(long = "execution-timeout-seconds", alias = "max-wall-time-seconds")]
     max_wall_time_seconds: Option<u64>,
 
     #[arg(long)]
@@ -155,7 +155,7 @@ struct PlanReviseArgs {
     #[arg(long)]
     clear_model: bool,
 
-    #[arg(long)]
+    #[arg(long = "execution-timeout-seconds", alias = "max-wall-time-seconds")]
     max_wall_time_seconds: Option<u64>,
 
     #[arg(long)]
@@ -350,6 +350,7 @@ fn create_template(
     })?;
     let path = parent.join(file_name);
     let template = PlanInput {
+        tasks: Vec::new(),
         workspace_id: "workspace-id".to_owned(),
         title: name.to_owned(),
         context: "Describe the task.".to_owned(),
@@ -414,6 +415,7 @@ fn plan_input(arguments: &PlanWriteArgs) -> Result<PlanInput> {
     };
     let defaults = PlanLimits::default();
     Ok(PlanInput {
+        tasks: Vec::new(),
         workspace_id,
         title: arguments
             .title
@@ -527,6 +529,7 @@ fn revised_input(arguments: &PlanReviseArgs, current: &PlanRecord) -> Result<Pla
         arguments.max_tokens.or(version.limits.max_tokens)
     };
     Ok(PlanInput {
+        tasks: version.tasks.clone(),
         workspace_id: arguments
             .workspace
             .clone()

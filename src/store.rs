@@ -14,7 +14,7 @@ mod runs;
 mod schedules;
 mod workspaces;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 9;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 10;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_COUNT: i64 = 100_000;
 const RUN_LEASE_DURATION: &str = "+60 seconds";
@@ -87,13 +87,30 @@ impl Store {
             return Ok(current);
         }
 
+        if current == 9 {
+            let occupied: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE julianday(expires_at) > julianday('now'))",
+                [], |row| row.get(0),
+            )?;
+            if occupied { return Err(ReactorError::InvalidInput("stop active executions before migration".to_owned())); }
+            if let Some(path) = self.connection.path().filter(|path| !path.is_empty()) {
+                let backup = format!("{path}.pre-v10-{}.sqlite3", crate::ids::new_id());
+                self.connection.execute("VACUUM INTO ?1", [&backup])?;
+                crate::permissions::restrict_file(Path::new(&backup))
+                    .map_err(|source| crate::error::io_error(&backup, source))?;
+            }
+        }
+
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Exclusive)?;
 
         if current == 0 {
             transaction.execute_batch(INITIAL_SCHEMA)?;
+            transaction.execute_batch(include_str!("../migrations/0002_tasks.sql"))?;
             insert_instance_id(&transaction)?;
+        } else if current == 9 {
+            transaction.execute_batch(include_str!("../migrations/0002_tasks.sql"))?;
         } else {
             return Err(ReactorError::SchemaMigrationRequired {
                 found: current,

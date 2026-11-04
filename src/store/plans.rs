@@ -240,6 +240,8 @@ fn insert_version(
             now
         ],
     )?;
+    transaction.execute("UPDATE plan_versions SET tasks_json = ?1 WHERE plan_id = ?2 AND version = ?3",
+        params![to_json(&input.tasks)?, plan_id, version])?;
     Ok(())
 }
 
@@ -561,6 +563,13 @@ fn query_version(
         }
     };
     Ok(PlanVersionRecord {
+        tasks: {
+            let json: String = connection.query_row(
+                "SELECT tasks_json FROM plan_versions WHERE plan_id = ?1 AND version = ?2",
+                params![plan_id, version], |row| row.get(0),
+            )?;
+            from_json(&json)?
+        },
         version,
         workspace_id: stored.workspace_id,
         status: stored.status,

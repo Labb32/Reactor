@@ -48,10 +48,23 @@ pub struct ExplicitRequirements {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PlanLimits {
+    #[serde(rename = "execution_timeout_seconds", alias = "max_wall_time_seconds")]
     pub max_wall_time_seconds: u64,
     pub max_attempts: u32,
     #[serde(default)]
     pub max_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanTask {
+    pub id: String,
+    #[serde(default)]
+    pub context: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_file: Option<String>,
+    #[serde(default)]
+    pub pause_on_warnings: bool,
 }
 
 impl Default for PlanLimits {
@@ -69,7 +82,10 @@ impl Default for PlanLimits {
 pub struct PlanInput {
     pub workspace_id: String,
     pub title: String,
+    #[serde(default)]
     pub context: String,
+    #[serde(default)]
+    pub tasks: Vec<PlanTask>,
     pub agent: AgentKind,
     #[serde(default)]
     pub provider: Option<String>,
@@ -102,6 +118,7 @@ impl AgentPlanDraft {
         limits: PlanLimits,
     ) -> PlanInput {
         PlanInput {
+            tasks: Vec::new(),
             workspace_id,
             title: self.title,
             context: self.context,
@@ -131,6 +148,8 @@ pub struct PlanVersionRecord {
     pub status: String,
     pub title: String,
     pub context: String,
+    #[serde(default)]
+    pub tasks: Vec<PlanTask>,
     pub completion_criteria: Vec<String>,
     pub agent: AgentKind,
     pub provider: Option<String>,
@@ -150,6 +169,19 @@ pub struct PlanApproval {
 }
 
 pub fn prepare_input(mut input: PlanInput, workspace: &WorkspaceRecord) -> Result<PlanInput> {
+    use std::io::Read;
+    for task in &mut input.tasks {
+        if let Some(path) = task.context_file.take() {
+            if !task.context.trim().is_empty() {
+                return Err(ReactorError::InvalidPlan("task context and context_file are mutually exclusive".to_owned()));
+            }
+            let file = std::fs::File::open(&path).map_err(|error| crate::error::io_error(&path, error))?;
+            let mut text = String::new();
+            file.take(MAX_CONTEXT_BYTES as u64 + 1).read_to_string(&mut text)
+                .map_err(|error| crate::error::io_error(&path, error))?;
+            task.context = text;
+        }
+    }
     validate_input(&input)?;
     input.provider = Some(
         input
@@ -219,10 +251,25 @@ fn validate_input(input: &PlanInput) -> Result<()> {
             "title must contain 1 to 200 bytes without control characters".to_owned(),
         ));
     }
-    if input.context.trim().is_empty() || input.context.len() > MAX_CONTEXT_BYTES {
+    if (input.context.trim().is_empty() && input.tasks.is_empty()) || input.context.len() > MAX_CONTEXT_BYTES {
         return Err(ReactorError::InvalidPlan(
             "context must contain 1 byte to 1 MiB".to_owned(),
         ));
+    }
+    if input.tasks.len() > 100 {
+        return Err(ReactorError::InvalidPlan("at most 100 sequential tasks are supported".to_owned()));
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut total_context = input.context.len();
+    for task in &input.tasks {
+        validate_id(&task.id)?;
+        total_context = total_context.saturating_add(task.context.len());
+        if !ids.insert(&task.id) || task.context.trim().is_empty() || task.context.len() > MAX_CONTEXT_BYTES {
+            return Err(ReactorError::InvalidPlan("task IDs must be unique and task context must contain 1 byte to 1 MiB".to_owned()));
+        }
+    }
+    if total_context > 8 * MAX_CONTEXT_BYTES {
+        return Err(ReactorError::InvalidPlan("combined task context exceeds 8 MiB".to_owned()));
     }
     if input.completion_criteria.len() > MAX_COMPLETION_CRITERIA
         || input
