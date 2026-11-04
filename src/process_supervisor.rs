@@ -12,6 +12,32 @@ pub fn process_absent(process_id: u32) -> bool {
     platform::process_absent(process_id)
 }
 
+pub fn process_identity(process_id: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        let stat = std::fs::read_to_string(format!("/proc/{process_id}/stat")).ok()?;
+        let fields = stat.rsplit_once(')')?.1.split_whitespace().collect::<Vec<_>>();
+        // /proc stat fields 5 (group) and 22 (kernel start ticks).
+        return Some(format!("linux:{}:{}:{}:{}", boot.trim(), process_id, fields.get(2)?, fields.get(19)?));
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{Foundation::{CloseHandle, FILETIME}, System::Threading::{OpenProcess, GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION}};
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if handle.is_null() { return None; }
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) } != 0;
+        unsafe { CloseHandle(handle); }
+        return ok.then(|| format!("windows:{process_id}:{}:{}", created.dwHighDateTime, created.dwLowDateTime));
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    { let _ = process_id; None }
+}
+
 pub struct ProcessSupervisor {
     child: Child,
     containment: platform::Containment,
@@ -211,7 +237,7 @@ mod platform {
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
                 SetInformationJobObject, TerminateJobObject,
             },
-            Threading::CREATE_NEW_PROCESS_GROUP,
+            Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED},
         },
     };
 
@@ -232,7 +258,7 @@ mod platform {
     }
 
     pub fn prepare(command: &mut Command) {
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
     }
 
     impl Containment {
@@ -270,7 +296,7 @@ mod platform {
             if unsafe { AssignProcessToJobObject(self.job, process) } == 0 {
                 Err(io::Error::last_os_error())
             } else {
-                Ok(())
+                resume_suspended_child(child.id())
             }
         }
 
@@ -291,6 +317,38 @@ mod platform {
                 Ok(())
             }
         }
+    }
+
+    fn resume_suspended_child(process_id: u32) -> io::Result<()> {
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{
+                Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32, TH32CS_SNAPTHREAD},
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+        // The child starts suspended: no user code runs before Job assignment.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE { return Err(io::Error::last_os_error()); }
+        let mut entry = THREADENTRY32::default();
+        entry.dwSize = size_of::<THREADENTRY32>() as u32;
+        let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        let mut result = Err(io::Error::other("suspended child thread not found"));
+        while found {
+            if entry.th32OwnerProcessID == process_id {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() { result = Err(io::Error::last_os_error()); }
+                else {
+                    let previous = unsafe { ResumeThread(thread) };
+                    result = if previous == 1 { Ok(()) } else { Err(io::Error::other("unexpected child suspension state")) };
+                    unsafe { CloseHandle(thread); }
+                }
+                break;
+            }
+            found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        unsafe { CloseHandle(snapshot); }
+        result
     }
 
     impl Drop for Containment {

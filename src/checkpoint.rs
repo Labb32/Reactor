@@ -198,6 +198,7 @@ fn capture(run_id: &str, workspace_id: &str, roots: &[PathBuf]) -> Result<Manife
     let mut remaining_text = MANIFEST_TEXT_LIMIT;
     let mut file_count = 0_usize;
     for root in roots {
+        crate::execution_control::check().map_err(|source| io_error(root, source))?;
         let canonical = dunce::canonicalize(root).map_err(|source| io_error(root, source))?;
         if canonical != *root {
             return Err(ReactorError::InvalidStoredData(format!(
@@ -242,6 +243,7 @@ fn capture_root(
     builder.filter_entry(move |entry| !excluded(&filter_root, entry.path()));
     let mut files = BTreeMap::new();
     for entry in builder.build() {
+        crate::execution_control::check().map_err(|source| io_error(root, source))?;
         let entry = entry.map_err(|error| ReactorError::InvalidInput(error.to_string()))?;
         if entry.path() == root {
             continue;
@@ -352,6 +354,7 @@ fn hash_file(mut file: fs::File, path: &Path, kind: &str) -> Result<FileEntry> {
     let mut buffer = [0_u8; 64 * 1024];
     let mut size = 0_u64;
     loop {
+        crate::execution_control::check().map_err(|source| io_error(path, source))?;
         let count = file
             .read(&mut buffer)
             .map_err(|source| io_error(path, source))?;

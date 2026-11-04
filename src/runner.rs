@@ -62,9 +62,13 @@ pub(crate) fn execute_available(
         return Ok(None);
     };
     let heartbeat = Heartbeat::start(paths, &claimed.id, &owner_id);
+    let budget = crate::execution_control::Guard::enter(
+        Duration::from_secs(600), Arc::clone(&heartbeat.lost), Arc::clone(&heartbeat.cancelled),
+    );
     app.store.fence_execution(Some((&claimed.id, &owner_id)));
     let result = execute_claimed(paths, app, &claimed.id, &owner_id, shutdown, &heartbeat.lost);
     app.store.fence_execution(None);
+    drop(budget);
     result.map(Some)
 }
 
@@ -110,6 +114,7 @@ fn execute_claimed(
     if ownership_lost.load(Ordering::Acquire) {
         return Ok(run);
     }
+    crate::execution_control::set_timeout(Some(Duration::from_secs(60)));
     record_checkpoint_result(paths, app, &run)
 }
 
@@ -166,6 +171,11 @@ fn execute_prepared(
             );
         }
     };
+    if let Err(error) = crate::execution_control::check() {
+        return app.store.finish_run(run_id, None, RunState::Preparing,
+            RunState::ReviewRequired, None, &format!("preparation_stopped: {error}"));
+    }
+    crate::execution_control::set_timeout(None);
 
     let attempt_id = crate::ids::new_id();
     let log_path = paths
@@ -442,6 +452,7 @@ fn record_checkpoint_result(
 
 struct Heartbeat {
     lost: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
     stop: mpsc::Sender<()>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -454,6 +465,8 @@ impl Heartbeat {
         let (stop, receiver) = mpsc::channel();
         let lost = Arc::new(AtomicBool::new(false));
         let signal = Arc::clone(&lost);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::clone(&cancelled);
         let handle = thread::spawn(move || {
             let Ok(store) = crate::store::Store::open_initialized(&database) else {
                 signal.store(true, Ordering::Release);
@@ -477,10 +490,16 @@ impl Heartbeat {
                         break;
                     }
                 }
+                match store.cancellation_requested(&run_id) {
+                    Ok(true) => cancellation.store(true, Ordering::Release),
+                    Ok(false) => {},
+                    Err(_) => { signal.store(true, Ordering::Release); break; }
+                }
             }
         });
         Self {
             lost,
+            cancelled,
             stop,
             handle: Some(handle),
         }

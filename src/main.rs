@@ -6,6 +6,7 @@ mod config;
 mod daemon;
 mod domain;
 mod error;
+mod execution_control;
 mod ids;
 mod input;
 mod interrupt;

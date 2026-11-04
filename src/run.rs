@@ -8,6 +8,8 @@ pub struct AttemptRecord {
     pub attempt_number: u32,
     pub process_id: Option<u32>,
     pub process_started_at: Option<String>,
+    #[serde(default)]
+    pub process_identity: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
     pub exit_code: Option<i32>,

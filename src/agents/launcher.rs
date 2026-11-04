@@ -8,6 +8,7 @@ pub(super) trait BoundedOutput {
 impl BoundedOutput for Command {
     fn bounded_output(&mut self) -> std::io::Result<std::process::Output> {
         use std::{io::Read, process::Stdio, sync::mpsc, thread, time::Duration};
+        crate::execution_control::check()?;
         // Commands cannot be moved out of &mut self; reproduce the explicit invocation.
         let mut command = Command::new(self.get_program());
         command.args(self.get_args());
@@ -31,9 +32,14 @@ impl BoundedOutput for Command {
             let result = stderr.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes).map(|_| bytes);
             let _ = sender.send((false, result));
         });
-        let status = match process.wait_for(Duration::from_secs(30))? {
-            Some(status) => status,
-            None => {
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Err(error) = crate::execution_control::check() {
+                process.stop(Duration::from_secs(3))?;
+                return Err(error);
+            }
+            if let Some(status) = process.wait_for(Duration::from_millis(250))? { break status; }
+            if started.elapsed() >= Duration::from_secs(30) {
                 process.stop(Duration::from_secs(3))?;
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "agent probe timed out"));
             }

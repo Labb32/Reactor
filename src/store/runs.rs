@@ -167,6 +167,7 @@ impl Store {
                 attempt_number: attempts + 1,
                 process_id: None,
                 process_started_at: None,
+                process_identity: None,
                 started_at: crate::time::now_utc(),
                 ended_at: None,
                 exit_code: None,
@@ -207,6 +208,7 @@ impl Store {
         attempt_id: &str,
         process_id: u32,
     ) -> Result<bool> {
+        let process_identity = crate::process_supervisor::process_identity(process_id);
         self.write_transaction(|transaction| {
             let now = crate::time::now_utc();
             let changed = transaction.execute(
@@ -226,6 +228,13 @@ impl Store {
                 return Err(ReactorError::InvalidStoredData(
                     "active attempt is missing".to_owned(),
                 ));
+            }
+            if let Some(identity) = &process_identity {
+                transaction.execute(
+                    "INSERT INTO reactor_meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![format!("process:{attempt_id}"), identity],
+                )?;
             }
             write_event(
                 transaction,
@@ -803,7 +812,7 @@ fn query_result(connection: &Connection, run_id: &str) -> Result<Option<RunResul
 }
 
 fn query_attempt(connection: &Connection, run_id: &str) -> Result<Option<AttemptRecord>> {
-    Ok(connection
+    let mut attempt = connection
         .query_row(
             "SELECT id, attempt_number, process_id, process_started_at, started_at,
                     ended_at, exit_code, termination_reason,
@@ -812,7 +821,13 @@ fn query_attempt(connection: &Connection, run_id: &str) -> Result<Option<Attempt
             [run_id],
             map_attempt,
         )
-        .optional()?)
+        .optional()?;
+    if let Some(attempt) = &mut attempt {
+        attempt.process_identity = connection.query_row(
+            "SELECT value FROM reactor_meta WHERE key = ?1", [format!("process:{}", attempt.id)], |row| row.get(0),
+        ).optional()?;
+    }
+    Ok(attempt)
 }
 
 fn map_attempt(row: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
@@ -821,6 +836,7 @@ fn map_attempt(row: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
         attempt_number: row.get(1)?,
         process_id: row.get(2)?,
         process_started_at: row.get(3)?,
+        process_identity: None,
         started_at: row.get(4)?,
         ended_at: row.get(5)?,
         exit_code: row.get(6)?,
