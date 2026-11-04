@@ -525,16 +525,14 @@ fn prepare(
             "workspace_policy_changed".to_owned(),
         ));
     }
-    let ready = workspace.agents.iter().any(|record| {
-        record.agent_kind == run.agent_kind
-            && record.status == "READY"
-            && record.policy_fingerprint.as_deref() == Some(&workspace.policy_fingerprint)
+    let prepared_agent = workspace.agents.iter().find(|record| {
+        record.agent_kind == run.agent_kind && record.status == "READY"
     });
-    if !ready {
+    let Some(prepared_agent) = prepared_agent else {
         return Ok(Preparation::ReviewRequired(
             "workspace_not_ready".to_owned(),
         ));
-    }
+    };
     let runtime = match runtime_workspace(paths, workspace, policy) {
         Ok(runtime) => runtime,
         Err(_) => {
@@ -545,7 +543,7 @@ fn prepare(
     };
     let canonical = runtime.canonical;
     let policy = &runtime.policy;
-    let current_fingerprint = match fingerprint(&canonical, policy, agent.adapter().policy_files())
+    let current_fingerprint = match fingerprint(&canonical, policy, &[])
     {
         Ok(fingerprint) => fingerprint,
         Err(_) => {
@@ -558,6 +556,13 @@ fn prepare(
         return Ok(Preparation::ReviewRequired(
             "workspace_policy_changed".to_owned(),
         ));
+    }
+    let agent_fingerprint = match fingerprint(&canonical, policy, agent.adapter().policy_files()) {
+        Ok(value) => value,
+        Err(_) => return Ok(Preparation::ReviewRequired("agent_policy_unreadable".to_owned())),
+    };
+    if prepared_agent.policy_fingerprint.as_deref() != Some(agent_fingerprint.as_str()) {
+        return Ok(Preparation::ReviewRequired("agent_policy_changed".to_owned()));
     }
     if validate_requirements(&plan.requirements, workspace).is_err()
         || validate_tools(&plan.requirements).is_err()
