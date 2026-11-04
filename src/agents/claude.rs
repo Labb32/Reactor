@@ -4,7 +4,7 @@ use semver::Version;
 
 use crate::{
     agents::{
-        AgentAdapter, AgentCommand, AgentPreflight, launcher::Launcher, output_version,
+        AgentAdapter, AgentCommand, AgentPreflight, launcher::{Launcher, BoundedOutput}, output_version,
         sandbox_failure,
     },
     error::{ReactorError, Result, io_error},
@@ -30,7 +30,7 @@ impl AgentAdapter for ClaudeAdapter {
         let Some(launcher) = Launcher::find("claude") else {
             return Ok(failed("not_installed"));
         };
-        let version_output = match launcher.command(["--version"]).output() {
+        let version_output = match launcher.command(["--version"]).bounded_output() {
             Ok(output) if output.status.success() => output,
             _ => return Ok(failed("version_check_failed")),
         };
@@ -50,7 +50,7 @@ impl AgentAdapter for ClaudeAdapter {
         }
         let authenticated = launcher
             .command(["auth", "status"])
-            .output()
+            .bounded_output()
             .map(|output| output.status.success())
             .unwrap_or(false);
         if !authenticated {

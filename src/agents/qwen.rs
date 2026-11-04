@@ -4,7 +4,7 @@ use semver::Version;
 
 use crate::{
     agents::{
-        AgentAdapter, AgentCommand, AgentPreflight, launcher::Launcher, output_version,
+        AgentAdapter, AgentCommand, AgentPreflight, launcher::{Launcher, BoundedOutput}, output_version,
         sandbox_failure,
     },
     error::{ReactorError, Result},
@@ -25,7 +25,7 @@ impl AgentAdapter for QwenAdapter {
         let Some(launcher) = Launcher::find("qwen") else {
             return Ok(failed("not_installed"));
         };
-        let version_output = match launcher.command(["--version"]).output() {
+        let version_output = match launcher.command(["--version"]).bounded_output() {
             Ok(output) if output.status.success() => output,
             _ => return Ok(failed("version_check_failed")),
         };

@@ -731,9 +731,14 @@ fn finish_capture(
     stdout: thread::JoinHandle<std::io::Result<Vec<u8>>>,
     stderr: thread::JoinHandle<std::io::Result<Vec<u8>>>,
 ) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
-    let stdout = join_capture(stdout);
-    let stderr = join_capture(stderr);
-    Ok((stdout?, stderr?))
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let output = join_capture(stdout);
+        let error = join_capture(stderr);
+        let _ = sender.send(output.and_then(|output| error.map(|error| (output, error))));
+    });
+    receiver.recv_timeout(Duration::from_secs(60))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "output collection timed out"))?
 }
 
 fn join_capture(handle: thread::JoinHandle<std::io::Result<Vec<u8>>>) -> std::io::Result<Vec<u8>> {
@@ -743,9 +748,14 @@ fn join_capture(handle: thread::JoinHandle<std::io::Result<Vec<u8>>>) -> std::io
 }
 
 fn join_input(handle: thread::JoinHandle<std::io::Result<()>>) -> std::io::Result<()> {
-    handle
-        .join()
-        .map_err(|_| std::io::Error::other("agent input thread panicked"))?
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(handle.join()
+            .map_err(|_| std::io::Error::other("agent input thread panicked"))
+            .and_then(|result| result));
+    });
+    receiver.recv_timeout(Duration::from_secs(2))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "agent input close timed out"))?
 }
 
 fn execution_prompt(plan: &PlanVersionRecord) -> String {

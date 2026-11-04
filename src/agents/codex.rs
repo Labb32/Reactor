@@ -4,7 +4,7 @@ use semver::Version;
 
 use crate::{
     agents::{
-        AgentAdapter, AgentCommand, AgentPreflight, launcher::Launcher, output_version,
+        AgentAdapter, AgentCommand, AgentPreflight, launcher::{Launcher, BoundedOutput}, output_version,
         sandbox_failure,
     },
     error::{Result, io_error},
@@ -24,7 +24,7 @@ impl AgentAdapter for CodexAdapter {
         let Some(launcher) = Launcher::find("codex") else {
             return Ok(failed("not_installed"));
         };
-        let version_output = match launcher.command(["--version"]).output() {
+        let version_output = match launcher.command(["--version"]).bounded_output() {
             Ok(output) if output.status.success() => output,
             _ => return Ok(failed("version_check_failed")),
         };
@@ -50,7 +50,7 @@ impl AgentAdapter for CodexAdapter {
                 "sandbox_workspace_write.network_access=false",
                 "--version",
             ])
-            .output()
+            .bounded_output()
             .map(|output| output.status.success())
             .unwrap_or(false);
         if !valid_config {
@@ -59,18 +59,18 @@ impl AgentAdapter for CodexAdapter {
 
         let authenticated = launcher
             .command(["login", "status"])
-            .output()
+            .bounded_output()
             .map(|output| output.status.success())
             .unwrap_or(false);
         if !authenticated {
             return Ok(failed_with_version("authentication_required", &version));
         }
 
-        let root_help = match launcher.command(["--help"]).output() {
+        let root_help = match launcher.command(["--help"]).bounded_output() {
             Ok(output) if output.status.success() => output,
             _ => return Ok(failed_with_version("non_interactive_unsupported", &version)),
         };
-        let exec_help = match launcher.command(["exec", "--help"]).output() {
+        let exec_help = match launcher.command(["exec", "--help"]).bounded_output() {
             Ok(output) if output.status.success() => output,
             _ => return Ok(failed_with_version("non_interactive_unsupported", &version)),
         };
@@ -88,7 +88,7 @@ impl AgentAdapter for CodexAdapter {
         }
         let mcp_supported = launcher
             .command(["mcp", "--help"])
-            .output()
+            .bounded_output()
             .map(|output| output.status.success())
             .unwrap_or(false);
         let hooks_supported = root_help.contains("--dangerously-bypass-hook-trust");
@@ -103,7 +103,7 @@ impl AgentAdapter for CodexAdapter {
             .arg("-C")
             .arg(workspace)
             .args(["rev-parse", "--is-inside-work-tree"])
-            .output()
+            .bounded_output()
             .map(|output| output.status.success())
             .unwrap_or(false);
         if !trusted_workspace {
