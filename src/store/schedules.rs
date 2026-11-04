@@ -489,7 +489,7 @@ fn materialize_occurrence(
 
     let plan =
         super::plans::query_plan(transaction, &schedule.plan_id, Some(schedule.plan_version))?;
-    let run_id = allocate_run_id(transaction, schedule_id, &occurrence.scheduled_at)?;
+    let run_id = allocate_run_id(transaction)?;
     transaction.execute(
         "INSERT INTO runs
          (id, workspace_id, plan_id, plan_version, occurrence_id, state, agent_kind,
@@ -558,32 +558,9 @@ fn insert_occurrence(
     Ok(id)
 }
 
-fn allocate_run_id(
-    transaction: &Transaction<'_>,
-    schedule_id: &str,
-    scheduled_at: &str,
-) -> Result<String> {
-    let timestamp = scheduled_at
-        .parse::<jiff::Timestamp>()
-        .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?
-        .to_string();
-    let compact = timestamp
-        .chars()
-        .take_while(|character| !matches!(character, '.' | 'Z'))
-        .filter(|character| character.is_ascii_digit() || *character == 'T')
-        .collect::<String>();
-    if compact.len() != 15 || compact.as_bytes().get(8) != Some(&b'T') {
-        return Err(ReactorError::InvalidStoredData(
-            "scheduled timestamp has an unsupported format".to_owned(),
-        ));
-    }
-    let base = format!("{schedule_id}-{compact}Z");
-    for number in 1_u32..=u32::MAX {
-        let id = if number == 1 {
-            base.clone()
-        } else {
-            format!("{base}-{number}")
-        };
+fn allocate_run_id(transaction: &Transaction<'_>) -> Result<String> {
+    for _ in 0..16 {
+        let id = crate::ids::new_id();
         if !super::runs::run_id_reserved(transaction, &id)? {
             return Ok(id);
         }

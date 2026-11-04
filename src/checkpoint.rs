@@ -79,7 +79,7 @@ pub fn begin(
     workspace_id: &str,
     roots: &[PathBuf],
 ) -> Result<()> {
-    if uuid::Uuid::parse_str(run_id).is_err() {
+    if !crate::ids::is_safe_run_id(run_id) {
         return Err(ReactorError::InvalidStoredData(
             "checkpoint run ID is invalid".to_owned(),
         ));
@@ -90,6 +90,7 @@ pub fn begin(
 }
 
 pub fn finish(paths: &ReactorPaths, run_id: &str, state: &str) -> Result<RunResult> {
+    validate_run_id(run_id)?;
     let pending = pending_path(paths, run_id);
     let before: Manifest = read_json(&pending)?;
     if before.run_id != run_id {
@@ -136,6 +137,7 @@ pub fn finish(paths: &ReactorPaths, run_id: &str, state: &str) -> Result<RunResu
 }
 
 pub fn complete(paths: &ReactorPaths, run_id: &str) -> Result<()> {
+    validate_run_id(run_id)?;
     let pending = pending_path(paths, run_id);
     match fs::remove_file(&pending) {
         Ok(()) => Ok(()),
@@ -155,7 +157,7 @@ pub fn read_diff(paths: &ReactorPaths, result: &RunResult) -> Result<DiffReport>
 }
 
 pub fn pending_exists(paths: &ReactorPaths, run_id: &str) -> bool {
-    pending_path(paths, run_id).is_file()
+    crate::ids::is_safe_run_id(run_id) && pending_path(paths, run_id).is_file()
 }
 
 pub fn pending_run_ids(paths: &ReactorPaths) -> Result<Vec<String>> {
@@ -175,12 +177,20 @@ pub fn pending_run_ids(paths: &ReactorPaths) -> Result<Vec<String>> {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        if uuid::Uuid::parse_str(id).is_ok() {
+        if crate::ids::is_safe_run_id(id) {
             ids.push(id.to_owned());
         }
     }
     ids.sort_unstable();
     Ok(ids)
+}
+
+fn validate_run_id(run_id: &str) -> Result<()> {
+    if crate::ids::is_safe_run_id(run_id) {
+        Ok(())
+    } else {
+        Err(ReactorError::InvalidStoredData("checkpoint run ID is invalid".to_owned()))
+    }
 }
 
 fn capture(run_id: &str, workspace_id: &str, roots: &[PathBuf]) -> Result<Manifest> {
