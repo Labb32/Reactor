@@ -34,3 +34,4 @@ Agent 환경 전달 목록과 격리·디스크·로그 정책은 SERVER_AUTOMAT
 ## 백업
 
 유지보수에 진입하고 daemon을 중지한 상태에서 backup create <새 디렉터리>를 수행한다. Reactor 설정·DB 기록·로그만 포함한다. Workspace·Git·Agent 세션 파일·OS 서비스 등록·인증 파일은 포함하지 않는다. 정기 실행·암호화·외부 보존은 운영 정책에 맡긴다. restore --replace는 기존 파일을 보관하고 유지보수를 유지한다. 미완료 journal이 있으면 같은 원본 백업으로 재실행한다.
+[Linux 서버 M5 테스트 가이드](LINUX_TEST_GUIDE.md)
