@@ -8,7 +8,7 @@ use std::{
 #[cfg(unix)]
 use std::{fs, io::Write};
 
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
 use crate::{
     daemon,
@@ -19,7 +19,78 @@ use crate::{
 #[cfg(unix)]
 use crate::permissions;
 
-const STATE_WAIT: Duration = Duration::from_secs(5);
+const STATE_WAIT: Duration = Duration::from_secs(30);
+
+#[derive(Serialize, Deserialize)]
+pub struct Registration { pub instance_id: String, pub system: bool }
+
+pub fn registration(paths: &ReactorPaths) -> Result<Registration> {
+    let path = paths.config_dir.join("service-registration.json");
+    let bytes = std::fs::read(&path).map_err(|error| io_error(&path, error))?;
+    let registration: Registration = serde_json::from_slice(&bytes).map_err(|error| service_error("registration", &error.to_string()))?;
+    validate_instance_id(&registration.instance_id)?;
+    Ok(registration)
+}
+
+fn save_registration(paths: &ReactorPaths, instance_id: &str, system: bool) -> Result<()> {
+    let bytes = serde_json::to_vec(&Registration { instance_id: instance_id.to_owned(), system })
+        .map_err(|error| service_error("registration", &error.to_string()))?;
+    let path = paths.config_dir.join("service-registration.json");
+    crate::operations::atomic_write(&path, &bytes)?;
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).map_err(|error| io_error(&path, error))?; }
+    Ok(())
+}
+
+fn system_mode(paths: &ReactorPaths) -> bool { registration(paths).is_ok_and(|registration| registration.system) }
+
+fn system_control(operation: &'static str, instance_id: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let name = format!("reactor-{instance_id}.service");
+        run_checked(operation, Command::new("systemctl").args([operation, &name]))
+    }
+    #[cfg(not(target_os = "linux"))]
+    { let _ = instance_id; Err(service_error(operation, "system services require Linux")) }
+}
+
+pub fn install_system(paths: &ReactorPaths, instance_id: &str, user: &str) -> Result<ServiceStatus> {
+    #[cfg(target_os = "linux")]
+    {
+        validate_instance_id(instance_id)?;
+        if user.is_empty() || user.len() > 64 || !user.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)) {
+            return Err(service_error("install", "invalid service account"));
+        }
+        let account = std::ffi::CString::new(user).map_err(|_| service_error("install", "invalid service account"))?;
+        let record = unsafe { libc::getpwnam(account.as_ptr()) };
+        if record.is_null() || unsafe { (*record).pw_uid } == 0 {
+            return Err(service_error("install", "an existing non-root service account is required"));
+        }
+        use std::os::unix::fs::MetadataExt;
+        let uid = unsafe { (*record).pw_uid };
+        for path in [&paths.config_dir, &paths.data_dir] {
+            if std::fs::metadata(path).map_err(|error| io_error(path, error))?.uid() != uid {
+                return Err(service_error("install", "config and data directories must already belong to the service account"));
+            }
+        }
+        fn quote(path: &Path) -> Result<String> {
+            let value = path.to_str().ok_or_else(|| service_error("install", "invalid service path"))?;
+            if value.chars().any(char::is_control) { return Err(service_error("install", "invalid service path")); }
+            Ok(format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%")))
+        }
+        let executable = dunce::canonicalize(std::env::current_exe().map_err(|error| io_error("executable", error))?).map_err(|error| io_error("executable", error))?;
+        let unit = format!("[Unit]\nDescription=Reactor agent scheduler\nAfter=network-online.target\n\n[Service]\nType=simple\nUser={user}\nExecStart={} daemon run --config-dir {} --data-dir {}\nRestart=on-failure\nRestartSec=5\nKillMode=mixed\nTimeoutStopSec=35min\nNoNewPrivileges=true\n\n[Install]\nWantedBy=multi-user.target\n",
+            quote(&executable)?, quote(&canonical_directory(&paths.config_dir)?)?, quote(&canonical_directory(&paths.data_dir)?)?);
+        let path = PathBuf::from("/etc/systemd/system").join(format!("reactor-{instance_id}.service"));
+        crate::operations::atomic_write(&path, unit.as_bytes())?;
+        run_checked("install", Command::new("systemctl").arg("daemon-reload"))?;
+        system_control("enable", instance_id)?;
+        save_registration(paths, instance_id, true)?;
+        return status(paths, instance_id);
+    }
+    #[cfg(not(target_os = "linux"))]
+    { let _ = (paths, instance_id, user); Err(service_error("install", "system services require Linux")) }
+}
 
 #[derive(Debug, Serialize)]
 pub struct ServiceStatus {
@@ -37,6 +108,7 @@ pub fn install(paths: &ReactorPaths, instance_id: &str) -> Result<ServiceStatus>
     let config_dir = canonical_directory(&paths.config_dir)?;
     let data_dir = canonical_directory(&paths.data_dir)?;
     platform::install(instance_id, &executable, &config_dir, &data_dir)?;
+    save_registration(paths, instance_id, false)?;
     status(paths, instance_id)
 }
 
@@ -46,16 +118,18 @@ pub fn start(paths: &ReactorPaths, instance_id: &str) -> Result<ServiceStatus> {
         return Err(service_error("start", "service is not installed"));
     }
     if !current.running {
-        platform::start(instance_id)?;
+        if system_mode(paths) { system_control("start", instance_id)?; } else { platform::start(instance_id)?; }
         wait_for(paths, true)?;
     }
     status(paths, instance_id)
 }
 
 pub fn stop(paths: &ReactorPaths, instance_id: &str) -> Result<ServiceStatus> {
+    let _ = crate::operations::set_maintenance(paths, true);
+    if crate::app::App::open(paths).is_ok() { crate::operations::drain(paths, Duration::from_secs(1800))?; }
     let current = status(paths, instance_id)?;
     if current.installed && current.running {
-        platform::stop(instance_id)?;
+        if system_mode(paths) { system_control("stop", instance_id)?; } else { platform::stop(instance_id)?; }
         wait_for(paths, false)?;
     }
     status(paths, instance_id)
@@ -64,11 +138,19 @@ pub fn stop(paths: &ReactorPaths, instance_id: &str) -> Result<ServiceStatus> {
 pub fn uninstall(paths: &ReactorPaths, instance_id: &str) -> Result<ServiceStatus> {
     let current = status(paths, instance_id)?;
     if current.running {
-        platform::stop(instance_id)?;
+        if system_mode(paths) { system_control("stop", instance_id)?; } else { platform::stop(instance_id)?; }
         wait_for(paths, false)?;
     }
     if current.installed {
-        platform::uninstall(instance_id)?;
+        if system_mode(paths) {
+            system_control("disable", instance_id)?;
+            #[cfg(target_os = "linux")]
+            {
+                let path = PathBuf::from("/etc/systemd/system").join(format!("reactor-{instance_id}.service"));
+                std::fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
+                run_checked("uninstall", Command::new("systemctl").arg("daemon-reload"))?;
+            }
+        } else { platform::uninstall(instance_id)?; }
     }
     status(paths, instance_id)
 }
@@ -76,8 +158,10 @@ pub fn uninstall(paths: &ReactorPaths, instance_id: &str) -> Result<ServiceStatu
 pub fn status(paths: &ReactorPaths, instance_id: &str) -> Result<ServiceStatus> {
     validate_instance_id(instance_id)?;
     Ok(ServiceStatus {
-        platform: platform::NAME,
-        installed: platform::installed(instance_id)?,
+        platform: if system_mode(paths) { "systemd_system" } else { platform::NAME },
+        installed: if system_mode(paths) {
+            PathBuf::from("/etc/systemd/system").join(format!("reactor-{instance_id}.service")).is_file()
+        } else { platform::installed(instance_id)? },
         running: daemon::is_running(paths)?,
     })
 }
@@ -95,7 +179,8 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
 fn wait_for(paths: &ReactorPaths, running: bool) -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < STATE_WAIT {
-        if daemon::is_running(paths)? == running {
+        if daemon::is_running(paths)? == running
+            && (!running || crate::operations::status(paths)?["ready"] == true) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
@@ -130,8 +215,9 @@ fn write_service_file(path: &Path, contents: &str) -> Result<()> {
 }
 
 fn run_checked(operation: &'static str, command: &mut Command) -> Result<()> {
+    use crate::agents::launcher::BoundedOutput;
     let output = command
-        .output()
+        .bounded_output()
         .map_err(|source| service_error(operation, &source.to_string()))?;
     if output.status.success() {
         Ok(())
@@ -303,7 +389,7 @@ mod platform {
         data_dir: &Path,
     ) -> Result<()> {
         let unit = format!(
-            "[Unit]\nDescription=Reactor agent scheduler\n\n[Service]\nType=simple\nExecStart={} daemon run --config-dir {} --data-dir {}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=Reactor agent scheduler\n\n[Service]\nType=simple\nExecStart={} daemon run --config-dir {} --data-dir {}\nRestart=on-failure\nRestartSec=5\nKillMode=mixed\nTimeoutStopSec=35min\n\n[Install]\nWantedBy=default.target\n",
             quote(executable)?,
             quote(config_dir)?,
             quote(data_dir)?

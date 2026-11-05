@@ -38,6 +38,8 @@ enum RunCommand {
     Retry(RunMutationArgs),
     /// Acknowledge Task warnings and continue the same Plan occurrence.
     Continue(RunIdArgs),
+    /// Recover eligible interrupted records and artifacts without rerunning an Agent.
+    Recover,
     /// Delete a completed run and its logs.
     Clear(RunClearArgs),
 }
@@ -103,6 +105,15 @@ pub(super) fn execute(format: OutputFormat, arguments: &RunArgs) -> Result<()> {
         RunCommand::List(arguments) => list(format, arguments),
         RunCommand::Cancel(arguments) => cancel(format, arguments),
         RunCommand::Retry(arguments) => retry(format, arguments),
+        RunCommand::Recover => {
+            let paths = ReactorPaths::discover()?;
+            let mut app = App::open(&paths)?;
+            let records = crate::runner::recover(&paths, &mut app)?;
+            match format {
+                OutputFormat::Text => { for run in &records { println!("{} {}", run.id, run.state); } Ok(()) },
+                _ => output::write_json(&Envelope::new(app.instance_id, records)),
+            }
+        },
         RunCommand::Continue(arguments) => {
             let paths = ReactorPaths::discover()?;
             let mut app = App::open(&paths)?;

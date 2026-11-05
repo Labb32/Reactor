@@ -18,6 +18,7 @@ impl Store {
         paths: &crate::paths::ReactorPaths,
     ) -> Result<Option<QueueRun>> {
         self.write_transaction(|transaction| {
+            if crate::operations::maintenance(paths) { return Ok(None); }
             super::schedules::refresh_due(transaction)?;
             let mut candidates = evaluate(transaction, config)?;
             candidates.sort_by_key(|run| run.dispatch_order);

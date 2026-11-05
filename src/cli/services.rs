@@ -18,6 +18,8 @@ pub(super) struct ServiceArgs {
 enum ServiceCommand {
     /// Register the current executable for user login.
     Install,
+    /// Install a Linux system service using an existing non-root account.
+    InstallSystem { #[arg(long)] user: String },
     /// Start the registered daemon.
     Start,
     /// Stop the registered daemon.
@@ -30,15 +32,21 @@ enum ServiceCommand {
 
 pub(super) fn execute(format: OutputFormat, arguments: &ServiceArgs) -> Result<()> {
     let paths = ReactorPaths::discover()?;
-    let app = App::open(&paths)?;
-    let status = match &arguments.command {
-        ServiceCommand::Install => crate::service::install(&paths, &app.instance_id)?,
-        ServiceCommand::Start => crate::service::start(&paths, &app.instance_id)?,
-        ServiceCommand::Stop => crate::service::stop(&paths, &app.instance_id)?,
-        ServiceCommand::Status => crate::service::status(&paths, &app.instance_id)?,
-        ServiceCommand::Uninstall => crate::service::uninstall(&paths, &app.instance_id)?,
+    let instance_id = if matches!(&arguments.command, ServiceCommand::Install | ServiceCommand::InstallSystem { .. }) {
+        App::open(&paths)?.instance_id
+    } else {
+        crate::service::registration(&paths).map(|record| record.instance_id)
+            .or_else(|_| App::open(&paths).map(|app| app.instance_id))?
     };
-    write_status(format, &app.instance_id, status)
+    let status = match &arguments.command {
+        ServiceCommand::Install => crate::service::install(&paths, &instance_id)?,
+        ServiceCommand::InstallSystem { user } => crate::service::install_system(&paths, &instance_id, user)?,
+        ServiceCommand::Start => crate::service::start(&paths, &instance_id)?,
+        ServiceCommand::Stop => crate::service::stop(&paths, &instance_id)?,
+        ServiceCommand::Status => crate::service::status(&paths, &instance_id)?,
+        ServiceCommand::Uninstall => crate::service::uninstall(&paths, &instance_id)?,
+    };
+    write_status(format, &instance_id, status)
 }
 
 fn write_status(format: OutputFormat, instance_id: &str, status: ServiceStatus) -> Result<()> {

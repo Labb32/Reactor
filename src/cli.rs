@@ -5,6 +5,7 @@ use serde::Serialize;
 
 mod daemon;
 mod logs;
+mod operations;
 mod plans;
 mod queue;
 mod runs;
@@ -49,6 +50,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Show readiness, maintenance, storage and applied configuration.
+    Status,
+    /// Show read-only operating prerequisites without invoking Agent probes.
+    Doctor,
+    /// Persist maintenance mode and drain execution.
+    Maintenance(operations::MaintenanceArgs),
     /// Initialize Reactor's configuration and local database.
     Init(InitArgs),
     /// Run the background scheduler.
@@ -149,6 +156,8 @@ const CAPABILITIES: &[&str] = &[
 
 fn execute(cli: &Cli) -> Result<()> {
     match &cli.command {
+        Command::Status | Command::Doctor => operations::status(cli.output),
+        Command::Maintenance(arguments) => operations::maintenance(cli.output, arguments),
         Command::Init(arguments) => initialize(cli.output, arguments),
         Command::Daemon(arguments) => daemon::execute(arguments),
         Command::Service(arguments) => services::execute(cli.output, arguments),

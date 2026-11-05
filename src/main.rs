@@ -12,6 +12,7 @@ mod ids;
 mod input;
 mod interrupt;
 mod output;
+mod operations;
 mod paths;
 mod permissions;
 mod plan;

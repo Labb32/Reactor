@@ -160,6 +160,9 @@ fn execute_prepared(
     ownership_lost: &AtomicBool,
 ) -> Result<RunRecord> {
     let run_id = &execution.record.id;
+    if crate::operations::maintenance(paths) {
+        return app.store.finish_run(run_id, None, RunState::Preparing, RunState::ReviewRequired, None, "maintenance_active");
+    }
     if ownership_lost.load(Ordering::Acquire)
         || shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
         return app.store.finish_run(
@@ -491,6 +494,9 @@ fn execute_prepared(
 pub fn recover(paths: &ReactorPaths, app: &mut App) -> Result<Vec<RunRecord>> {
     let owner_id = crate::ids::new_id();
     let mut recovered = app.store.recover_interrupted_runs(&owner_id)?;
+    for run in &recovered {
+        if !checkpoint::pending_exists(paths, &run.id) { app.store.release_run(&run.id, &owner_id)?; }
+    }
     // A missing before-manifest cannot be recreated after execution: keep the
     // result unavailable rather than inventing a misleading empty diff.
     for run_id in checkpoint::pending_run_ids(paths)? {

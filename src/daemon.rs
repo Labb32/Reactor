@@ -27,21 +27,23 @@ pub fn run(paths: ReactorPaths) -> Result<()> {
     App::initialize(paths.clone(), None)?;
     let shutdown = interrupt::install("daemon shutdown handler")?;
     let mut app = App::open(&paths)?;
+    let readiness = crate::operations::Readiness::starting(&paths, &app.config)?;
     runner::prepare_execution(&paths, &mut app)?;
     let worker_count = usize::from(app.config.concurrency.global);
-    drop(app);
 
     let (sender, receiver) = mpsc::channel();
+    let (startup_sender, startup_receiver) = mpsc::channel();
     let mut spawned = 0_usize;
-    for worker_index in 0..worker_count {
+    for _worker_index in 0..worker_count {
         let sender = sender.clone();
         let paths = paths.clone();
         let worker_shutdown = shutdown.clone();
+        let startup = startup_sender.clone();
         let result = thread::Builder::new()
             .name("reactor-worker".to_owned())
             .spawn(move || {
                 let outcome = match catch_unwind(AssertUnwindSafe(|| {
-                    worker(&paths, &worker_shutdown, worker_index == 0)
+                    worker(&paths, &worker_shutdown, startup)
                 })) {
                     Ok(result) => result,
                     Err(_) => Err(ReactorError::InvalidStoredData(
@@ -62,21 +64,40 @@ pub fn run(paths: ReactorPaths) -> Result<()> {
         }
     }
     drop(sender);
+    drop(startup_sender);
+    for _ in 0..worker_count {
+        if startup_receiver.recv() != Ok(true) { shutdown.store(true, Ordering::Release); }
+    }
     let mut failure = None;
-    for _ in 0..spawned {
-        match receiver.recv() {
-            Ok(Ok(())) => {}
+    if !shutdown.load(Ordering::Acquire) {
+        if let Err(error) = readiness.ready() {
+            shutdown.store(true, Ordering::Release); failure = Some(error);
+        }
+    }
+    let mut remaining = spawned;
+    while remaining > 0 {
+        match receiver.recv_timeout(RECOVERY_INTERVAL) {
+            Ok(Ok(())) => { remaining -= 1; }
             Ok(Err(error)) => {
+                remaining -= 1;
                 shutdown.store(true, Ordering::Release);
                 failure.get_or_insert(error);
             }
-            Err(_) => {
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !shutdown.load(Ordering::Acquire) {
+                    if let Err(error) = runner::recover(&paths, &mut app).and_then(|_| readiness.ready()) {
+                        shutdown.store(true, Ordering::Release); failure.get_or_insert(error);
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 shutdown.store(true, Ordering::Release);
                 failure.get_or_insert_with(|| {
                     ReactorError::InvalidStoredData(
                         "daemon worker result channel closed".to_owned(),
                     )
                 });
+                break;
             }
         }
     }
@@ -87,14 +108,14 @@ pub fn is_running(paths: &ReactorPaths) -> Result<bool> {
     Ok(DaemonLock::try_acquire(paths, false)?.is_none())
 }
 
-fn worker(paths: &ReactorPaths, shutdown: &AtomicBool, maintains_recovery: bool) -> Result<()> {
-    let mut app = App::open(paths)?;
-    let mut last_recovery = Instant::now();
+fn worker(paths: &ReactorPaths, shutdown: &AtomicBool, startup: mpsc::Sender<bool>) -> Result<()> {
+    let mut app = match App::open(paths) {
+        Ok(app) => app,
+        Err(error) => { let _ = startup.send(false); return Err(error); }
+    };
+    let _ = startup.send(true);
+    drop(startup);
     while !shutdown.load(Ordering::Acquire) {
-        if maintains_recovery && last_recovery.elapsed() >= RECOVERY_INTERVAL {
-            runner::recover(paths, &mut app)?;
-            last_recovery = Instant::now();
-        }
         if runner::execute_available(paths, &mut app, Some(shutdown))?.is_none() {
             thread::sleep(IDLE_POLL_INTERVAL);
         }

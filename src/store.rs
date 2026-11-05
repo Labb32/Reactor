@@ -61,6 +61,10 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn has_active_execution(&self) -> Result<bool> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE state IN ('PREPARING', 'RUNNING'))
+            OR EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run')", [], |row| row.get(0))?)
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         configure_connection(&connection)?;
