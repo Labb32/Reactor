@@ -10,7 +10,11 @@ mod platform {
 
     pub fn try_lock_mode(file: &File, exclusive: bool) -> io::Result<bool> {
         // SAFETY: flock only reads the valid descriptor owned by file.
-        let mode = if exclusive { libc::LOCK_EX } else { libc::LOCK_SH };
+        let mode = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
         if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } == 0 {
             return Ok(true);
         }
@@ -57,7 +61,11 @@ mod platform {
         let result = unsafe {
             LockFileEx(
                 file.as_raw_handle() as HANDLE,
-                (if exclusive { LOCKFILE_EXCLUSIVE_LOCK } else { 0 }) | LOCKFILE_FAIL_IMMEDIATELY,
+                (if exclusive {
+                    LOCKFILE_EXCLUSIVE_LOCK
+                } else {
+                    0
+                }) | LOCKFILE_FAIL_IMMEDIATELY,
                 0,
                 1,
                 0,

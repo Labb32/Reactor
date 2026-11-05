@@ -20,27 +20,36 @@ impl Store {
         })
     }
 
-
     pub fn protected_log_runs(&self) -> Result<std::collections::HashSet<String>> {
-        let mut statement = self.connection.prepare("SELECT r.id FROM runs r WHERE
+        let mut statement = self.connection.prepare(
+            "SELECT r.id FROM runs r WHERE
             r.state IN ('PREPARING', 'RUNNING', 'REVIEW_REQUIRED')
             OR EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = r.id)
-            OR (r.state <> 'MISSED' AND NOT EXISTS(SELECT 1 FROM run_results WHERE run_id = r.id))")?;
-        Ok(statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
+            OR (r.state <> 'MISSED' AND NOT EXISTS(SELECT 1 FROM run_results WHERE run_id = r.id))",
+        )?;
+        Ok(statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn prepare_run_deletion(&mut self, run_id: &str) -> Result<()> {
         self.write_transaction(|tx| {
             ensure_deletable(tx, run_id)?;
-            tx.execute("INSERT OR IGNORE INTO reactor_meta (key, value) VALUES (?1, ?2)",
-                params![format!("deletion:{run_id}"), crate::time::now_utc()])?;
+            tx.execute(
+                "INSERT OR IGNORE INTO reactor_meta (key, value) VALUES (?1, ?2)",
+                params![format!("deletion:{run_id}"), crate::time::now_utc()],
+            )?;
             Ok(())
         })
     }
 
     pub(crate) fn pending_deletions(&self) -> Result<Vec<String>> {
-        let mut statement = self.connection.prepare("SELECT substr(key, 10) FROM reactor_meta WHERE key LIKE 'deletion:%'")?;
-        Ok(statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
+        let mut statement = self
+            .connection
+            .prepare("SELECT substr(key, 10) FROM reactor_meta WHERE key LIKE 'deletion:%'")?;
+        Ok(statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     }
     pub fn record_log_deletion(&mut self, run_id: &str, deleted_files: usize) -> Result<()> {
         self.write_transaction(|transaction| {
@@ -397,13 +406,13 @@ impl Store {
                 &now,
             )?;
             if reason != "task_warning_review" {
-            super::schedules::finish_recurring_run(
-                transaction,
-                current.occurrence_id.as_deref(),
-                next == RunState::Succeeded,
-                now.parse::<jiff::Timestamp>()
-                    .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?,
-            )?;
+                super::schedules::finish_recurring_run(
+                    transaction,
+                    current.occurrence_id.as_deref(),
+                    next == RunState::Succeeded,
+                    now.parse::<jiff::Timestamp>()
+                        .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?,
+                )?;
             }
             query_run(transaction, run_id)
         })
@@ -640,20 +649,50 @@ pub(super) fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunR
 
 fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
     let source = query_run(transaction, run_id)?;
-    let restored: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reactor_meta WHERE key = ?1)",
-        [format!("restore_block:{run_id}")], |row| row.get(0))?;
-    if restored { return Err(ReactorError::InvalidArgument("restored occurrence has no backed-up execution workspace; start a new occurrence".to_owned())); }
-    let deleting: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reactor_meta WHERE key = ?1)",
-        [format!("deletion:{run_id}")], |row| row.get(0))?;
-    if deleting { return Err(ReactorError::InvalidArgument("run deletion is pending".to_owned())); }
-    if source.tasks.iter().any(|task| task.state == "WAITING_REVIEW") {
-        return Err(ReactorError::InvalidArgument("acknowledge task warnings with run continue".to_owned()));
+    let restored: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM reactor_meta WHERE key = ?1)",
+        [format!("restore_block:{run_id}")],
+        |row| row.get(0),
+    )?;
+    if restored {
+        return Err(ReactorError::InvalidArgument(
+            "restored occurrence has no backed-up execution workspace; start a new occurrence"
+                .to_owned(),
+        ));
+    }
+    let deleting: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM reactor_meta WHERE key = ?1)",
+        [format!("deletion:{run_id}")],
+        |row| row.get(0),
+    )?;
+    if deleting {
+        return Err(ReactorError::InvalidArgument(
+            "run deletion is pending".to_owned(),
+        ));
+    }
+    if source
+        .tasks
+        .iter()
+        .any(|task| task.state == "WAITING_REVIEW")
+    {
+        return Err(ReactorError::InvalidArgument(
+            "acknowledge task warnings with run continue".to_owned(),
+        ));
     }
     let finalizing: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = ?1)", [run_id], |row| row.get(0),
+        "SELECT EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = ?1)",
+        [run_id],
+        |row| row.get(0),
     )?;
-    if finalizing || source.attempt.as_ref().is_some_and(|attempt| attempt.ended_at.is_none()) {
-        return Err(ReactorError::InvalidArgument("execution or result recovery is still active".to_owned()));
+    if finalizing
+        || source
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.ended_at.is_none())
+    {
+        return Err(ReactorError::InvalidArgument(
+            "execution or result recovery is still active".to_owned(),
+        ));
     }
     let state = parse_state(&source.state)?;
     if !matches!(
@@ -708,14 +747,19 @@ fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
             "retry source changed unexpectedly".to_owned(),
         ));
     }
-    transaction.execute("UPDATE runs SET task_index = ?1, execution_path = ?2 WHERE id = ?3",
-        params![source.task_index, source.execution_path, new_run_id])?;
+    transaction.execute(
+        "UPDATE runs SET task_index = ?1, execution_path = ?2 WHERE id = ?3",
+        params![source.task_index, source.execution_path, new_run_id],
+    )?;
     transaction.execute("INSERT INTO run_tasks (run_id, task_index, task_id, state, warnings_json, response, updated_at)
         SELECT ?1, task_index, task_id, CASE WHEN task_index >= ?2 THEN 'WAITING' ELSE state END,
                warnings_json, response, ?3 FROM run_tasks WHERE run_id = ?4",
         params![new_run_id, source.task_index, now, run_id])?;
     if let Some(occurrence) = &source.occurrence_id {
-        transaction.execute("UPDATE schedule_occurrences SET run_id = ?1 WHERE id = ?2", params![new_run_id, occurrence])?;
+        transaction.execute(
+            "UPDATE schedule_occurrences SET run_id = ?1 WHERE id = ?2",
+            params![new_run_id, occurrence],
+        )?;
     }
     write_event(
         transaction,
@@ -772,7 +816,10 @@ fn clear_run(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
         [run_id],
     )?;
     transaction.execute("DELETE FROM runs WHERE id = ?1", [run_id])?;
-    transaction.execute("DELETE FROM reactor_meta WHERE key = ?1", [format!("deletion:{run_id}")])?;
+    transaction.execute(
+        "DELETE FROM reactor_meta WHERE key = ?1",
+        [format!("deletion:{run_id}")],
+    )?;
     write_event(
         transaction,
         "RUN_DELETED",
@@ -786,12 +833,25 @@ fn clear_run(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
 
 fn ensure_deletable(connection: &Connection, run_id: &str) -> Result<()> {
     let run = query_run(connection, run_id)?;
-    let busy: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = ?1)", [run_id], |row| row.get(0))?;
-    let referenced: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE retry_of = ?1)", [run_id], |row| row.get(0))?;
-    if busy || referenced || run.tasks.iter().any(|task| task.state == "WAITING_REVIEW")
+    let busy: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = ?1)",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let referenced: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE retry_of = ?1)",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    if busy
+        || referenced
+        || run.tasks.iter().any(|task| task.state == "WAITING_REVIEW")
         || (run.result.is_none() && run.state != "MISSED")
-        || !parse_state(&run.state)?.is_terminal() {
-        return Err(ReactorError::InvalidArgument("run is active, protected, referenced, or awaiting result recovery".to_owned()));
+        || !parse_state(&run.state)?.is_terminal()
+    {
+        return Err(ReactorError::InvalidArgument(
+            "run is active, protected, referenced, or awaiting result recovery".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -846,8 +906,16 @@ pub(super) fn query_run(connection: &Connection, run_id: &str) -> Result<RunReco
     let limits = serde_json::from_str::<PlanLimits>(&stored.limits_json)
         .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
     Ok(RunRecord {
-        task_index: connection.query_row("SELECT task_index FROM runs WHERE id = ?1", [run_id], |row| row.get(0))?,
-        execution_path: connection.query_row("SELECT execution_path FROM runs WHERE id = ?1", [run_id], |row| row.get(0))?,
+        task_index: connection.query_row(
+            "SELECT task_index FROM runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?,
+        execution_path: connection.query_row(
+            "SELECT execution_path FROM runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?,
         tasks: super::tasks::query_tasks(connection, run_id)?,
         id: run_id.to_owned(),
         workspace_id: stored.workspace_id,
@@ -902,13 +970,23 @@ fn query_attempt(connection: &Connection, run_id: &str) -> Result<Option<Attempt
         )
         .optional()?;
     if let Some(attempt) = &mut attempt {
-        attempt.process_identity = connection.query_row(
-            "SELECT value FROM reactor_meta WHERE key = ?1", [format!("process:{}", attempt.id)], |row| row.get(0),
-        ).optional()?;
-        let events: Option<String> = connection.query_row("SELECT value FROM reactor_meta WHERE key = ?1",
-            [format!("events:{}", attempt.id)], |row| row.get(0)).optional()?;
+        attempt.process_identity = connection
+            .query_row(
+                "SELECT value FROM reactor_meta WHERE key = ?1",
+                [format!("process:{}", attempt.id)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let events: Option<String> = connection
+            .query_row(
+                "SELECT value FROM reactor_meta WHERE key = ?1",
+                [format!("events:{}", attempt.id)],
+                |row| row.get(0),
+            )
+            .optional()?;
         if let Some(events) = events {
-            let value: serde_json::Value = serde_json::from_str(&events).map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
+            let value: serde_json::Value = serde_json::from_str(&events)
+                .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
             attempt.final_response = value["response"].as_str().map(str::to_owned);
             attempt.session_id = value["session_id"].as_str().map(str::to_owned);
         }

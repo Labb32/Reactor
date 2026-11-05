@@ -17,25 +17,52 @@ pub fn process_identity(process_id: u32) -> Option<String> {
     {
         let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
         let stat = std::fs::read_to_string(format!("/proc/{process_id}/stat")).ok()?;
-        let fields = stat.rsplit_once(')')?.1.split_whitespace().collect::<Vec<_>>();
+        let fields = stat
+            .rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .collect::<Vec<_>>();
         // /proc stat fields 5 (group) and 22 (kernel start ticks).
-        return Some(format!("linux:{}:{}:{}:{}", boot.trim(), process_id, fields.get(2)?, fields.get(19)?));
+        return Some(format!(
+            "linux:{}:{}:{}:{}",
+            boot.trim(),
+            process_id,
+            fields.get(2)?,
+            fields.get(19)?
+        ));
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::{Foundation::{CloseHandle, FILETIME}, System::Threading::{OpenProcess, GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION}};
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, FILETIME},
+            System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        };
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
-        if handle.is_null() { return None; }
+        if handle.is_null() {
+            return None;
+        }
         let mut created = FILETIME::default();
         let mut exited = FILETIME::default();
         let mut kernel = FILETIME::default();
         let mut user = FILETIME::default();
-        let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) } != 0;
-        unsafe { CloseHandle(handle); }
-        return ok.then(|| format!("windows:{process_id}:{}:{}", created.dwHighDateTime, created.dwLowDateTime));
+        let ok =
+            unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }
+                != 0;
+        unsafe {
+            CloseHandle(handle);
+        }
+        return ok.then(|| {
+            format!(
+                "windows:{process_id}:{}:{}",
+                created.dwHighDateTime, created.dwLowDateTime
+            )
+        });
     }
     #[cfg(not(any(target_os = "linux", windows)))]
-    { let _ = process_id; None }
+    {
+        let _ = process_id;
+        None
+    }
 }
 
 pub struct ProcessSupervisor {
@@ -132,12 +159,17 @@ mod platform {
     use libc::{ESRCH, SIGKILL, SIGTERM, kill};
 
     pub fn process_absent(process_id: u32) -> bool {
-        let Ok(pid) = i32::try_from(process_id) else { return false; };
-        if pid <= 0 { return false; }
+        let Ok(pid) = i32::try_from(process_id) else {
+            return false;
+        };
+        if pid <= 0 {
+            return false;
+        }
         // SAFETY: Signal zero probes existence without changing either process/group.
         for target in [pid, -pid] {
             if unsafe { kill(target, 0) } == 0
-                || io::Error::last_os_error().raw_os_error() != Some(ESRCH) {
+                || io::Error::last_os_error().raw_os_error() != Some(ESRCH)
+            {
                 return false;
             }
         }
@@ -258,7 +290,9 @@ mod platform {
             return io::Error::last_os_error().raw_os_error() == Some(87);
         }
         let stopped = unsafe { WaitForSingleObject(handle, 0) } == 0;
-        unsafe { CloseHandle(handle); }
+        unsafe {
+            CloseHandle(handle);
+        }
         stopped
     }
 
@@ -328,13 +362,18 @@ mod platform {
         use windows_sys::Win32::{
             Foundation::INVALID_HANDLE_VALUE,
             System::{
-                Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32, TH32CS_SNAPTHREAD},
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                    Thread32Next,
+                },
                 Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
             },
         };
         // The child starts suspended: no user code runs before Job assignment.
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-        if snapshot == INVALID_HANDLE_VALUE { return Err(io::Error::last_os_error()); }
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
         let mut entry = THREADENTRY32::default();
         entry.dwSize = size_of::<THREADENTRY32>() as u32;
         let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
@@ -342,17 +381,26 @@ mod platform {
         while found {
             if entry.th32OwnerProcessID == process_id {
                 let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
-                if thread.is_null() { result = Err(io::Error::last_os_error()); }
-                else {
+                if thread.is_null() {
+                    result = Err(io::Error::last_os_error());
+                } else {
                     let previous = unsafe { ResumeThread(thread) };
-                    result = if previous == 1 { Ok(()) } else { Err(io::Error::other("unexpected child suspension state")) };
-                    unsafe { CloseHandle(thread); }
+                    result = if previous == 1 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other("unexpected child suspension state"))
+                    };
+                    unsafe {
+                        CloseHandle(thread);
+                    }
                 }
                 break;
             }
             found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
         }
-        unsafe { CloseHandle(snapshot); }
+        unsafe {
+            CloseHandle(snapshot);
+        }
         result
     }
 
@@ -372,7 +420,9 @@ mod platform {
 
     pub struct Containment;
 
-    pub fn process_absent(_process_id: u32) -> bool { false }
+    pub fn process_absent(_process_id: u32) -> bool {
+        false
+    }
 
     pub fn prepare(_command: &mut Command) {}
 
@@ -408,24 +458,46 @@ impl BoundedOutput for Command {
         let mut command = Command::new(self.get_program());
         command.env_clear().envs(crate::agents::environment(None));
         command.args(self.get_args());
-        if let Some(directory) = self.get_current_dir() { command.current_dir(directory); }
-        for (key, value) in self.get_envs() {
-            match value { Some(value) => { command.env(key, value); }, None => { command.env_remove(key); } }
+        if let Some(directory) = self.get_current_dir() {
+            command.current_dir(directory);
         }
-        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        for (key, value) in self.get_envs() {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut process = crate::process_supervisor::ProcessSupervisor::spawn(command)?;
-        let stdout = process.take_stdout().ok_or_else(|| std::io::Error::other("probe stdout unavailable"))?;
-        let stderr = process.take_stderr().ok_or_else(|| std::io::Error::other("probe stderr unavailable"))?;
+        let stdout = process
+            .take_stdout()
+            .ok_or_else(|| std::io::Error::other("probe stdout unavailable"))?;
+        let stderr = process
+            .take_stderr()
+            .ok_or_else(|| std::io::Error::other("probe stderr unavailable"))?;
         let (sender, receiver) = mpsc::channel();
         let output_sender = sender.clone();
         thread::spawn(move || {
             let mut bytes = Vec::new();
-            let result = stdout.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes).map(|_| bytes);
+            let result = stdout
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes);
             let _ = output_sender.send((true, result));
         });
         thread::spawn(move || {
             let mut bytes = Vec::new();
-            let result = stderr.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes).map(|_| bytes);
+            let result = stderr
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes);
             let _ = sender.send((false, result));
         });
         let started = std::time::Instant::now();
@@ -434,24 +506,41 @@ impl BoundedOutput for Command {
                 process.stop(Duration::from_secs(3))?;
                 return Err(error);
             }
-            if let Some(status) = process.wait_for(Duration::from_millis(250))? { break status; }
+            if let Some(status) = process.wait_for(Duration::from_millis(250))? {
+                break status;
+            }
             if started.elapsed() >= Duration::from_secs(30) {
                 process.stop(Duration::from_secs(3))?;
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "agent probe timed out"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "agent probe timed out",
+                ));
             }
         };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         for _ in 0..2 {
-            let (is_stdout, result) = receiver.recv_timeout(Duration::from_secs(2))
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "agent probe output timed out"))?;
+            let (is_stdout, result) =
+                receiver.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "agent probe output timed out",
+                    )
+                })?;
             let bytes = result?;
             if bytes.len() > 8 * 1024 * 1024 {
                 return Err(std::io::Error::other("agent probe output exceeds 8 MiB"));
             }
-            if is_stdout { stdout = bytes; } else { stderr = bytes; }
+            if is_stdout {
+                stdout = bytes;
+            } else {
+                stderr = bytes;
+            }
         }
-        Ok(std::process::Output { status, stdout, stderr })
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
-

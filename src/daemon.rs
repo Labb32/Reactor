@@ -66,18 +66,23 @@ pub fn run(paths: ReactorPaths) -> Result<()> {
     drop(sender);
     drop(startup_sender);
     for _ in 0..worker_count {
-        if startup_receiver.recv() != Ok(true) { shutdown.store(true, Ordering::Release); }
+        if startup_receiver.recv() != Ok(true) {
+            shutdown.store(true, Ordering::Release);
+        }
     }
     let mut failure = None;
     if !shutdown.load(Ordering::Acquire) {
         if let Err(error) = readiness.ready() {
-            shutdown.store(true, Ordering::Release); failure = Some(error);
+            shutdown.store(true, Ordering::Release);
+            failure = Some(error);
         }
     }
     let mut remaining = spawned;
     while remaining > 0 {
         match receiver.recv_timeout(RECOVERY_INTERVAL) {
-            Ok(Ok(())) => { remaining -= 1; }
+            Ok(Ok(())) => {
+                remaining -= 1;
+            }
             Ok(Err(error)) => {
                 remaining -= 1;
                 shutdown.store(true, Ordering::Release);
@@ -85,8 +90,11 @@ pub fn run(paths: ReactorPaths) -> Result<()> {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !shutdown.load(Ordering::Acquire) {
-                    if let Err(error) = runner::recover(&paths, &mut app).and_then(|_| readiness.ready()) {
-                        shutdown.store(true, Ordering::Release); failure.get_or_insert(error);
+                    if let Err(error) =
+                        runner::recover(&paths, &mut app).and_then(|_| readiness.ready())
+                    {
+                        shutdown.store(true, Ordering::Release);
+                        failure.get_or_insert(error);
                     }
                 }
             }
@@ -111,7 +119,10 @@ pub fn is_running(paths: &ReactorPaths) -> Result<bool> {
 fn worker(paths: &ReactorPaths, shutdown: &AtomicBool, startup: mpsc::Sender<bool>) -> Result<()> {
     let mut app = match App::open(paths) {
         Ok(app) => app,
-        Err(error) => { let _ = startup.send(false); return Err(error); }
+        Err(error) => {
+            let _ = startup.send(false);
+            return Err(error);
+        }
     };
     let _ = startup.send(true);
     drop(startup);
@@ -167,4 +178,3 @@ impl Drop for DaemonLock {
 fn lock_path(paths: &ReactorPaths) -> PathBuf {
     paths.data_dir.join("daemon.lock")
 }
-

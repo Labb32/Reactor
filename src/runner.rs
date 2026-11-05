@@ -3,8 +3,7 @@ use std::{
     path::Path,
     process::{Command, ExitStatus, Stdio},
     sync::{
-        Arc,
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -42,13 +41,15 @@ pub fn execute_next(paths: &ReactorPaths, app: &mut App) -> Result<Option<RunRec
 
 pub(crate) fn prepare_execution(paths: &ReactorPaths, app: &mut App) -> Result<()> {
     for run_id in app.store.pending_deletions()? {
-        run_log::remove_run_directory(&paths.data_dir.join("runs"), &run_id).map_err(|error| io_error(&run_id, error))?;
+        run_log::remove_run_directory(&paths.data_dir.join("runs"), &run_id)
+            .map_err(|error| io_error(&run_id, error))?;
         checkpoint::remove_run_artifacts(paths, &run_id)?;
         app.store.clear_run(&run_id)?;
     }
     recover(paths, app)?;
     let runs_dir = paths.data_dir.join("runs");
-    run_log::prune(&runs_dir, &app.store.protected_log_runs()?).map_err(|source| io_error(&runs_dir, source))?;
+    run_log::prune(&runs_dir, &app.store.protected_log_runs()?)
+        .map_err(|source| io_error(&runs_dir, source))?;
     Ok(())
 }
 
@@ -70,17 +71,33 @@ pub(crate) fn execute_available(
     };
     let heartbeat = Heartbeat::start(paths, &claimed.id, &owner_id);
     let budget = crate::execution_control::Guard::enter(
-        Duration::from_secs(600), Arc::clone(&heartbeat.lost), Arc::clone(&heartbeat.cancelled),
+        Duration::from_secs(600),
+        Arc::clone(&heartbeat.lost),
+        Arc::clone(&heartbeat.cancelled),
     );
     app.store.fence_execution(Some((&claimed.id, &owner_id)));
-    let result = execute_claimed(paths, app, &claimed.id, &owner_id, shutdown, &heartbeat.lost);
+    let result = execute_claimed(
+        paths,
+        app,
+        &claimed.id,
+        &owner_id,
+        shutdown,
+        &heartbeat.lost,
+    );
     app.store.fence_execution(None);
     drop(budget);
     if let Ok(run) = &result {
-        if run.state == "FAILED" && run.limits.max_attempts > 1
-            && run.attempt.as_ref().and_then(|attempt| attempt.termination_reason.as_deref()) == Some("agent_transient") {
+        if run.state == "FAILED"
+            && run.limits.max_attempts > 1
+            && run
+                .attempt
+                .as_ref()
+                .and_then(|attempt| attempt.termination_reason.as_deref())
+                == Some("agent_transient")
+        {
             let retry = app.store.retry_run(&run.id, None)?;
-            app.store.delay_retry(&retry.id, if run.retry_of.is_none() { 60 } else { 300 })?;
+            app.store
+                .delay_retry(&retry.id, if run.retry_of.is_none() { 60 } else { 300 })?;
         }
     }
     result.map(Some)
@@ -115,14 +132,22 @@ fn execute_claimed(
     let original_roots = runtime.policy.write_paths(&runtime.canonical.path);
     let _locks = crate::workspace_execution::WorkspaceLocks::acquire(&original_roots)?;
     if !execution.record.tasks.is_empty() && execution.record.execution_path.is_none() {
-        let path = crate::workspace_execution::prepare_worktree(paths, run_id, &runtime.canonical.path)?;
-        app.store.set_execution_path(run_id, &path.to_string_lossy())?;
+        let path =
+            crate::workspace_execution::prepare_worktree(paths, run_id, &runtime.canonical.path)?;
+        app.store
+            .set_execution_path(run_id, &path.to_string_lossy())?;
         execution = app.store.execution_run(run_id)?;
     }
-    let execution_root = execution.record.execution_path.as_deref().map(Path::new).unwrap_or(&runtime.canonical.path);
+    let execution_root = execution
+        .record
+        .execution_path
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or(&runtime.canonical.path);
     let roots = runtime.policy.write_paths(execution_root);
     if !checkpoint::pending_exists(paths, run_id)
-        && checkpoint::begin(paths, run_id, &execution.record.workspace_id, &roots).is_err() {
+        && checkpoint::begin(paths, run_id, &execution.record.workspace_id, &roots).is_err()
+    {
         let run = app.store.finish_run(
             run_id,
             None,
@@ -136,10 +161,21 @@ fn execute_claimed(
     }
     let mut first_task = true;
     let run = loop {
-        if !first_task { crate::execution_control::set_timeout(Some(Duration::from_secs(600))); }
+        if !first_task {
+            crate::execution_control::set_timeout(Some(Duration::from_secs(600)));
+        }
         first_task = false;
-        let run = execute_prepared(paths, app, execution, workspace.clone(), shutdown, ownership_lost)?;
-        if run.state != "PREPARING" || ownership_lost.load(Ordering::Acquire) { break run; }
+        let run = execute_prepared(
+            paths,
+            app,
+            execution,
+            workspace.clone(),
+            shutdown,
+            ownership_lost,
+        )?;
+        if run.state != "PREPARING" || ownership_lost.load(Ordering::Acquire) {
+            break run;
+        }
         execution = app.store.execution_run(run_id)?;
     };
     if ownership_lost.load(Ordering::Acquire) {
@@ -163,10 +199,18 @@ fn execute_prepared(
 ) -> Result<RunRecord> {
     let run_id = &execution.record.id;
     if crate::operations::maintenance(paths) {
-        return app.store.finish_run(run_id, None, RunState::Preparing, RunState::ReviewRequired, None, "maintenance_active");
+        return app.store.finish_run(
+            run_id,
+            None,
+            RunState::Preparing,
+            RunState::ReviewRequired,
+            None,
+            "maintenance_active",
+        );
     }
     if ownership_lost.load(Ordering::Acquire)
-        || shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
+        || shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
+    {
         return app.store.finish_run(
             run_id,
             None,
@@ -190,8 +234,17 @@ fn execute_prepared(
         &execution.record.plan_id,
         Some(execution.record.plan_version),
     )?;
-    if !plan.version.tasks.is_empty() && execution.record.task_index as usize >= plan.version.tasks.len() {
-        return app.store.finish_run(run_id, None, RunState::Preparing, RunState::Succeeded, None, "tasks_acknowledged");
+    if !plan.version.tasks.is_empty()
+        && execution.record.task_index as usize >= plan.version.tasks.len()
+    {
+        return app.store.finish_run(
+            run_id,
+            None,
+            RunState::Preparing,
+            RunState::Succeeded,
+            None,
+            "tasks_acknowledged",
+        );
     }
     let mut prepared = match prepare(
         paths,
@@ -213,30 +266,69 @@ fn execute_prepared(
         }
     };
     if let Err(error) = crate::execution_control::check() {
-        return app.store.finish_run(run_id, None, RunState::Preparing,
-            RunState::ReviewRequired, None, &format!("preparation_stopped: {error}"));
+        return app.store.finish_run(
+            run_id,
+            None,
+            RunState::Preparing,
+            RunState::ReviewRequired,
+            None,
+            &format!("preparation_stopped: {error}"),
+        );
     }
     crate::execution_control::set_timeout(None);
     if let Some(path) = &execution.record.execution_path {
         let root = Path::new(path);
         crate::workspace_execution::validate_policy_files(
-            Path::new(&workspace.canonical_path), root, prepared.agent.adapter().policy_files(),
+            Path::new(&workspace.canonical_path),
+            root,
+            prepared.agent.adapter().policy_files(),
         )?;
-        prepared.command = prepared.agent.adapter().command(root, &execution.policy, plan.version.model.as_deref())?;
+        prepared.command = prepared.agent.adapter().command(
+            root,
+            &execution.policy,
+            plan.version.model.as_deref(),
+        )?;
     }
     let persistent = !plan.version.tasks.is_empty();
-    let session = if persistent { app.store.workspace_session(&execution.record.workspace_id)? } else { None };
-    let session_policy = format!("{}:{}", workspace.policy_fingerprint,
-        workspace.agents.iter().find(|agent| agent.agent_kind == "codex")
-            .and_then(|agent| agent.policy_fingerprint.as_deref()).unwrap_or(""));
-    if session.as_ref().is_some_and(|session| session.policy_fingerprint != session_policy
-        || session.model != plan.version.model || session.provider != plan.version.provider) {
-        return app.store.finish_run(run_id, None, RunState::Preparing, RunState::ReviewRequired, None, "session_configuration_changed");
+    let session = if persistent {
+        app.store
+            .workspace_session(&execution.record.workspace_id)?
+    } else {
+        None
+    };
+    let session_policy = format!(
+        "{}:{}",
+        workspace.policy_fingerprint,
+        workspace
+            .agents
+            .iter()
+            .find(|agent| agent.agent_kind == "codex")
+            .and_then(|agent| agent.policy_fingerprint.as_deref())
+            .unwrap_or("")
+    );
+    if session.as_ref().is_some_and(|session| {
+        session.policy_fingerprint != session_policy
+            || session.model != plan.version.model
+            || session.provider != plan.version.provider
+    }) {
+        return app.store.finish_run(
+            run_id,
+            None,
+            RunState::Preparing,
+            RunState::ReviewRequired,
+            None,
+            "session_configuration_changed",
+        );
     }
     let expected_session = session.as_ref().map(|session| session.id.as_str());
     if persistent {
         let root = prepared.command.current_dir.clone();
-        prepared.command = prepared.agent.adapter().session_command(&root, &execution.policy, plan.version.model.as_deref(), expected_session)?;
+        prepared.command = prepared.agent.adapter().session_command(
+            &root,
+            &execution.policy,
+            plan.version.model.as_deref(),
+            expected_session,
+        )?;
     }
 
     let attempt_id = crate::ids::new_id();
@@ -287,7 +379,9 @@ fn execute_prepared(
     };
 
     if ownership_lost.load(Ordering::Acquire) {
-        return Err(ReactorError::InvalidStoredData("run ownership lost before spawn".to_owned()));
+        return Err(ReactorError::InvalidStoredData(
+            "run ownership lost before spawn".to_owned(),
+        ));
     }
     let command = process_command(&prepared.command, prepared.agent);
     let mut supervisor = match ProcessSupervisor::spawn(command) {
@@ -409,23 +503,39 @@ fn execute_prepared(
     let log_failed = captured.is_err() || flush_result.is_err();
     let (stdout, stderr) = captured.unwrap_or_default();
     if ownership_lost.load(Ordering::Acquire) {
-        // Leave the record and lease for recovery; a former owner must not finalize it.
+        // Only the current owner may finalize this run.
         return app.store.get_run(run_id);
     }
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
-    let events = events.lock().map_err(|_| ReactorError::InvalidStoredData("agent events lock poisoned".to_owned()))?.clone();
+    let events = events
+        .lock()
+        .map_err(|_| ReactorError::InvalidStoredData("agent events lock poisoned".to_owned()))?
+        .clone();
     app.store.record_agent_events(&attempt.id, &events)?;
     let token_usage = if matches!(prepared.agent, AgentKind::Codex) {
-        if events.usage_seen && !events.incomplete { Some(events.tokens) } else { None }
-    } else { prepared.agent.adapter().token_usage(&stdout) };
-    let invalid_session = persistent && (events.session_id.is_none()
-        || expected_session.is_some_and(|expected| events.session_id.as_deref() != Some(expected)));
+        if events.usage_seen && !events.incomplete {
+            Some(events.tokens)
+        } else {
+            None
+        }
+    } else {
+        prepared.agent.adapter().token_usage(&stdout)
+    };
+    let invalid_session = persistent
+        && (events.session_id.is_none()
+            || expected_session
+                .is_some_and(|expected| events.session_id.as_deref() != Some(expected)));
     if persistent && !invalid_session {
-        app.store.save_workspace_session(&execution.record.workspace_id, &crate::store::sessions::WorkspaceSession {
-            id: events.session_id.clone().unwrap_or_default(), policy_fingerprint: session_policy,
-            model: plan.version.model.clone(), provider: plan.version.provider.clone(),
-        })?;
+        app.store.save_workspace_session(
+            &execution.record.workspace_id,
+            &crate::store::sessions::WorkspaceSession {
+                id: events.session_id.clone().unwrap_or_default(),
+                policy_fingerprint: session_policy,
+                model: plan.version.model.clone(),
+                provider: plan.version.provider.clone(),
+            },
+        )?;
     }
     if let Some(tokens) = token_usage {
         app.store
@@ -438,7 +548,9 @@ fn execute_prepared(
         StopReason::Shutdown => (RunState::ReviewRequired, "runner_interrupted"),
         StopReason::InvalidSession => (RunState::ReviewRequired, "session_identity_changed"),
         StopReason::ArtifactFailure => (RunState::ReviewRequired, "artifact_io_error"),
-        StopReason::Exited if invalid_session => (RunState::ReviewRequired, "session_id_unavailable"),
+        StopReason::Exited if invalid_session => {
+            (RunState::ReviewRequired, "session_id_unavailable")
+        }
         StopReason::Exited if log_failed => (RunState::Failed, "log_io_error"),
         StopReason::Exited if stdin_result.is_err() => (RunState::Failed, "input_failed"),
         StopReason::Exited
@@ -448,7 +560,11 @@ fn execute_prepared(
         {
             (RunState::ReviewRequired, "sandbox_denied")
         }
-        StopReason::Exited if !outcome.status.success() && events.retryable && !events.incomplete => (RunState::Failed, "agent_transient"),
+        StopReason::Exited
+            if !outcome.status.success() && events.retryable && !events.incomplete =>
+        {
+            (RunState::Failed, "agent_transient")
+        }
         StopReason::Exited if !outcome.status.success() => (RunState::Failed, "agent_exit"),
         StopReason::Exited
             if execution
@@ -468,19 +584,43 @@ fn execute_prepared(
         StopReason::Exited => (RunState::Failed, "agent_exit"),
     };
     if !plan.version.tasks.is_empty() {
-        let (response, mut warnings, blocking) = task_result(events.response.as_deref().unwrap_or(""));
-        if events.incomplete { warnings.push("info: agent_event_stream_incomplete".to_owned()); }
-        let pause = next == RunState::Succeeded && (blocking
-            || (plan.version.tasks[execution.record.task_index as usize].pause_on_warnings && !warnings.is_empty()));
-        app.store.record_task_outcome(run_id,
-            if pause { "WAITING_REVIEW" } else if next == RunState::Succeeded { "SUCCEEDED" } else { next.as_str() },
-            &warnings, &response)?;
-        if pause {
-            return app.store.finish_run(run_id, Some(&attempt.id), RunState::Running,
-                RunState::ReviewRequired, outcome.status.code(), "task_warning_review");
+        let (response, mut warnings, blocking) =
+            crate::agent_events::task_result(events.response.as_deref().unwrap_or(""));
+        if events.incomplete {
+            warnings.push("info: agent_event_stream_incomplete".to_owned());
         }
-        if next == RunState::Succeeded && (execution.record.task_index as usize + 1) < plan.version.tasks.len() {
-            return app.store.advance_task(run_id, &attempt.id, outcome.status.code());
+        let pause = next == RunState::Succeeded
+            && (blocking
+                || (plan.version.tasks[execution.record.task_index as usize].pause_on_warnings
+                    && !warnings.is_empty()));
+        app.store.record_task_outcome(
+            run_id,
+            if pause {
+                "WAITING_REVIEW"
+            } else if next == RunState::Succeeded {
+                "SUCCEEDED"
+            } else {
+                next.as_str()
+            },
+            &warnings,
+            &response,
+        )?;
+        if pause {
+            return app.store.finish_run(
+                run_id,
+                Some(&attempt.id),
+                RunState::Running,
+                RunState::ReviewRequired,
+                outcome.status.code(),
+                "task_warning_review",
+            );
+        }
+        if next == RunState::Succeeded
+            && (execution.record.task_index as usize + 1) < plan.version.tasks.len()
+        {
+            return app
+                .store
+                .advance_task(run_id, &attempt.id, outcome.status.code());
         }
     }
     app.store.finish_run(
@@ -497,7 +637,9 @@ pub fn recover(paths: &ReactorPaths, app: &mut App) -> Result<Vec<RunRecord>> {
     let owner_id = crate::ids::new_id();
     let mut recovered = app.store.recover_interrupted_runs(&owner_id)?;
     for run in &recovered {
-        if !checkpoint::pending_exists(paths, &run.id) { app.store.release_run(&run.id, &owner_id)?; }
+        if !checkpoint::pending_exists(paths, &run.id) {
+            app.store.release_run(&run.id, &owner_id)?;
+        }
     }
     // A missing before-manifest cannot be recreated after execution: keep the
     // result unavailable rather than inventing a misleading empty diff.
@@ -510,7 +652,9 @@ pub fn recover(paths: &ReactorPaths, app: &mut App) -> Result<Vec<RunRecord>> {
             }
             Err(error) => return Err(error),
         };
-        if run.tasks.iter().any(|task| task.state == "WAITING_REVIEW") { continue; }
+        if run.tasks.iter().any(|task| task.state == "WAITING_REVIEW") {
+            continue;
+        }
         if run.result.is_some() {
             checkpoint::complete(paths, &run_id)?;
             continue;
@@ -595,8 +739,11 @@ impl Heartbeat {
                 }
                 match store.cancellation_requested(&run_id) {
                     Ok(true) => cancellation.store(true, Ordering::Release),
-                    Ok(false) => {},
-                    Err(_) => { signal.store(true, Ordering::Release); break; }
+                    Ok(false) => {}
+                    Err(_) => {
+                        signal.store(true, Ordering::Release);
+                        break;
+                    }
                 }
             }
         });
@@ -661,9 +808,10 @@ fn prepare(
             "workspace_policy_changed".to_owned(),
         ));
     }
-    let prepared_agent = workspace.agents.iter().find(|record| {
-        record.agent_kind == run.agent_kind && record.status == "READY"
-    });
+    let prepared_agent = workspace
+        .agents
+        .iter()
+        .find(|record| record.agent_kind == run.agent_kind && record.status == "READY");
     let Some(prepared_agent) = prepared_agent else {
         return Ok(Preparation::ReviewRequired(
             "workspace_not_ready".to_owned(),
@@ -679,8 +827,7 @@ fn prepare(
     };
     let canonical = runtime.canonical;
     let policy = &runtime.policy;
-    let current_fingerprint = match fingerprint(&canonical, policy, &[])
-    {
+    let current_fingerprint = match fingerprint(&canonical, policy, &[]) {
         Ok(fingerprint) => fingerprint,
         Err(_) => {
             return Ok(Preparation::ReviewRequired(
@@ -695,10 +842,16 @@ fn prepare(
     }
     let agent_fingerprint = match fingerprint(&canonical, policy, agent.adapter().policy_files()) {
         Ok(value) => value,
-        Err(_) => return Ok(Preparation::ReviewRequired("agent_policy_unreadable".to_owned())),
+        Err(_) => {
+            return Ok(Preparation::ReviewRequired(
+                "agent_policy_unreadable".to_owned(),
+            ));
+        }
     };
     if prepared_agent.policy_fingerprint.as_deref() != Some(agent_fingerprint.as_str()) {
-        return Ok(Preparation::ReviewRequired("agent_policy_changed".to_owned()));
+        return Ok(Preparation::ReviewRequired(
+            "agent_policy_changed".to_owned(),
+        ));
     }
     if validate_requirements(&plan.requirements, workspace).is_err()
         || validate_tools(&plan.requirements).is_err()
@@ -723,7 +876,9 @@ fn prepare(
         ));
     }
     if !plan.tasks.is_empty() && preflight.capabilities["session_resume"] != true {
-        return Ok(Preparation::ReviewRequired("session_resume_unsupported".to_owned()));
+        return Ok(Preparation::ReviewRequired(
+            "session_resume_unsupported".to_owned(),
+        ));
     }
     let command = match agent
         .adapter()
@@ -819,24 +974,46 @@ fn monitor(
     let mut last_disk_check = Instant::now();
     loop {
         if RunLog::failed(log) {
-            let status = supervisor.stop(STOP_GRACE_PERIOD).map_err(|source| io_error(log_path, source))?;
-            return Ok(ProcessOutcome { status, reason: StopReason::ArtifactFailure });
+            let status = supervisor
+                .stop(STOP_GRACE_PERIOD)
+                .map_err(|source| io_error(log_path, source))?;
+            return Ok(ProcessOutcome {
+                status,
+                reason: StopReason::ArtifactFailure,
+            });
         }
         if last_disk_check.elapsed() >= Duration::from_secs(30) {
             let run = app.store.get_run(run_id)?;
             let mut roots = app.store.get_workspace(&run.workspace_id)?.write_paths();
             roots.push(log_path.to_owned());
             let _ = crate::storage::sufficient(&roots);
-            if let Some(root) = log_path.parent().and_then(Path::parent) { crate::storage::warn_log_size(root); }
+            if let Some(root) = log_path.parent().and_then(Path::parent) {
+                crate::storage::warn_log_size(root);
+            }
             last_disk_check = Instant::now();
         }
-        if expected_session.is_some_and(|expected| events.lock().map(|events|
-            events.session_id.as_deref().is_some_and(|actual| actual != expected)).unwrap_or(true)) {
-            let status = supervisor.stop(STOP_GRACE_PERIOD).map_err(|source| io_error(log_path, source))?;
-            return Ok(ProcessOutcome { status, reason: StopReason::InvalidSession });
+        if expected_session.is_some_and(|expected| {
+            events
+                .lock()
+                .map(|events| {
+                    events
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|actual| actual != expected)
+                })
+                .unwrap_or(true)
+        }) {
+            let status = supervisor
+                .stop(STOP_GRACE_PERIOD)
+                .map_err(|source| io_error(log_path, source))?;
+            return Ok(ProcessOutcome {
+                status,
+                reason: StopReason::InvalidSession,
+            });
         }
         if ownership_lost.load(Ordering::Acquire)
-            || shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
+            || shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
+        {
             let status = supervisor
                 .stop(STOP_GRACE_PERIOD)
                 .map_err(|source| io_error(log_path, source))?;
@@ -887,8 +1064,11 @@ fn finish_capture(
         let error = join_capture(stderr);
         let _ = sender.send(output.and_then(|output| error.map(|error| (output, error))));
     });
-    receiver.recv_timeout(Duration::from_secs(60))
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "output collection timed out"))?
+    receiver
+        .recv_timeout(Duration::from_secs(60))
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "output collection timed out")
+        })?
 }
 
 fn join_capture(handle: thread::JoinHandle<std::io::Result<Vec<u8>>>) -> std::io::Result<Vec<u8>> {
@@ -900,12 +1080,16 @@ fn join_capture(handle: thread::JoinHandle<std::io::Result<Vec<u8>>>) -> std::io
 fn join_input(handle: thread::JoinHandle<std::io::Result<()>>) -> std::io::Result<()> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let _ = sender.send(handle.join()
-            .map_err(|_| std::io::Error::other("agent input thread panicked"))
-            .and_then(|result| result));
+        let _ = sender.send(
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("agent input thread panicked"))
+                .and_then(|result| result),
+        );
     });
-    receiver.recv_timeout(Duration::from_secs(2))
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "agent input close timed out"))?
+    receiver.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "agent input close timed out")
+    })?
 }
 
 fn execution_prompt(plan: &PlanVersionRecord, task_index: u32) -> String {
@@ -924,34 +1108,4 @@ fn execution_prompt(plan: &PlanVersionRecord, task_index: u32) -> String {
         prompt.push_str("</completion_criteria>");
     }
     prompt
-}
-
-fn task_result(stdout: &str) -> (String, Vec<String>, bool) {
-    let mut response = stdout.to_owned();
-    let mut report = None;
-    for line in stdout.lines() {
-        if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
-            if event["type"] == "item.completed" && event["item"]["type"] == "agent_message" {
-                if let Some(text) = event["item"]["text"].as_str() { response = text.to_owned(); }
-            }
-            if event.get("reactor_task_result").is_some() { report = Some(event); }
-        }
-    }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) {
-        if value.get("reactor_task_result").is_some() { report = Some(value); }
-    }
-    let Some(report) = report else { return (response, Vec::new(), false); };
-    let Some(items) = report["reactor_task_result"]["warnings"].as_array() else {
-        return (response, vec!["invalid_task_warning_report".to_owned()], true);
-    };
-    let mut warnings = Vec::new();
-    let mut blocking = false;
-    for warning in items.iter().take(100) {
-        let level = warning["level"].as_str().unwrap_or("unknown");
-        let message = warning["message"].as_str().unwrap_or("invalid_warning_message");
-        blocking |= level != "info" || warning["message"].as_str().is_none();
-        warnings.push(format!("{level}: {}", message.chars().take(2000).collect::<String>()));
-    }
-    if items.len() > 100 { blocking = true; warnings.push("warning_report_truncated".to_owned()); }
-    (response, warnings, blocking)
 }
