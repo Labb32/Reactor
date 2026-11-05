@@ -71,7 +71,7 @@ impl Default for PlanLimits {
     fn default() -> Self {
         Self {
             max_wall_time_seconds: 7_200,
-            max_attempts: 1,
+            max_attempts: 3,
             max_tokens: None,
         }
     }

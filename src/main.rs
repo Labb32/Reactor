@@ -1,4 +1,5 @@
 mod agents;
+mod agent_events;
 mod app;
 mod checkpoint;
 mod cli;

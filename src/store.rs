@@ -12,6 +12,7 @@ mod plans;
 mod queue;
 mod runs;
 mod schedules;
+pub(crate) mod sessions;
 mod tasks;
 mod workspaces;
 

@@ -58,6 +58,10 @@ enum WorkspaceCommand {
     Prepare(WorkspacePrepareArgs),
     /// Show a workspace and refresh its policy state.
     Status(WorkspaceIdArgs),
+    /// Show the explicit active Codex session ID.
+    Session(WorkspaceIdArgs),
+    /// Reset the active session reference while the Workspace is idle.
+    SessionReset(WorkspaceIdArgs),
     /// List registered workspaces.
     List,
 }
@@ -99,6 +103,25 @@ pub(super) fn execute(format: OutputFormat, arguments: &WorkspaceArgs) -> Result
         WorkspaceCommand::Add(arguments) => workspace_add(format, arguments),
         WorkspaceCommand::Prepare(arguments) => workspace_prepare(format, arguments),
         WorkspaceCommand::Status(arguments) => workspace_status(format, arguments),
+        WorkspaceCommand::Session(arguments) => {
+            let paths = ReactorPaths::discover()?;
+            let app = App::open(&paths)?;
+            app.store.get_workspace(&arguments.workspace_id)?;
+            let session = app.store.workspace_session(&arguments.workspace_id)?;
+            match format {
+                crate::output::OutputFormat::Text => { println!("session: {}", session.as_ref().map(|session| session.id.as_str()).unwrap_or("none")); Ok(()) },
+                _ => output::write_json(&crate::output::Envelope::new(app.instance_id, session)),
+            }
+        },
+        WorkspaceCommand::SessionReset(arguments) => {
+            let paths = ReactorPaths::discover()?;
+            let mut app = App::open(&paths)?;
+            app.store.reset_workspace_session(&arguments.workspace_id)?;
+            match format {
+                crate::output::OutputFormat::Text => { println!("session reset: {}", arguments.workspace_id); Ok(()) },
+                _ => output::write_json(&crate::output::Envelope::new(app.instance_id, serde_json::json!({"workspace_id": arguments.workspace_id, "session_id": null}))),
+            }
+        },
         WorkspaceCommand::List => workspace_list(format),
     }
 }

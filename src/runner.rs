@@ -4,6 +4,7 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{
         Arc,
+        Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -69,6 +70,13 @@ pub(crate) fn execute_available(
     let result = execute_claimed(paths, app, &claimed.id, &owner_id, shutdown, &heartbeat.lost);
     app.store.fence_execution(None);
     drop(budget);
+    if let Ok(run) = &result {
+        if run.state == "FAILED" && run.limits.max_attempts > 1
+            && run.attempt.as_ref().and_then(|attempt| attempt.termination_reason.as_deref()) == Some("agent_transient") {
+            let retry = app.store.retry_run(&run.id, None)?;
+            app.store.delay_retry(&retry.id, if run.retry_of.is_none() { 60 } else { 300 })?;
+        }
+    }
     result.map(Some)
 }
 
@@ -205,6 +213,20 @@ fn execute_prepared(
         )?;
         prepared.command = prepared.agent.adapter().command(root, &execution.policy, plan.version.model.as_deref())?;
     }
+    let persistent = !plan.version.tasks.is_empty();
+    let session = if persistent { app.store.workspace_session(&execution.record.workspace_id)? } else { None };
+    let session_policy = format!("{}:{}", workspace.policy_fingerprint,
+        workspace.agents.iter().find(|agent| agent.agent_kind == "codex")
+            .and_then(|agent| agent.policy_fingerprint.as_deref()).unwrap_or(""));
+    if session.as_ref().is_some_and(|session| session.policy_fingerprint != session_policy
+        || session.model != plan.version.model || session.provider != plan.version.provider) {
+        return app.store.finish_run(run_id, None, RunState::Preparing, RunState::ReviewRequired, None, "session_configuration_changed");
+    }
+    let expected_session = session.as_ref().map(|session| session.id.as_str());
+    if persistent {
+        let root = prepared.command.current_dir.clone();
+        prepared.command = prepared.agent.adapter().session_command(&root, &execution.policy, plan.version.model.as_deref(), expected_session)?;
+    }
 
     let attempt_id = crate::ids::new_id();
     let log_path = paths
@@ -298,7 +320,9 @@ fn execute_prepared(
     };
     let stdout_log = log.clone();
     let stderr_log = log.clone();
-    let stdout_thread = thread::spawn(move || run_log::capture(stdout, stdout_log));
+    let events = Arc::new(Mutex::new(crate::agent_events::Events::default()));
+    let observed = Arc::clone(&events);
+    let stdout_thread = thread::spawn(move || run_log::capture_agent(stdout, stdout_log, observed));
     let stderr_thread = thread::spawn(move || run_log::capture(stderr, stderr_log));
 
     if !app
@@ -346,6 +370,8 @@ fn execute_prepared(
         &log_path,
         shutdown,
         ownership_lost,
+        &events,
+        expected_session,
     ) {
         Ok(outcome) => outcome,
         Err(_) => {
@@ -376,7 +402,19 @@ fn execute_prepared(
     }
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
-    let token_usage = prepared.agent.adapter().token_usage(&stdout);
+    let events = events.lock().map_err(|_| ReactorError::InvalidStoredData("agent events lock poisoned".to_owned()))?.clone();
+    app.store.record_agent_events(&attempt.id, &events)?;
+    let token_usage = if matches!(prepared.agent, AgentKind::Codex) {
+        if events.usage_seen && !events.incomplete { Some(events.tokens) } else { None }
+    } else { prepared.agent.adapter().token_usage(&stdout) };
+    let invalid_session = persistent && (events.session_id.is_none()
+        || expected_session.is_some_and(|expected| events.session_id.as_deref() != Some(expected)));
+    if persistent && !invalid_session {
+        app.store.save_workspace_session(&execution.record.workspace_id, &crate::store::sessions::WorkspaceSession {
+            id: events.session_id.clone().unwrap_or_default(), policy_fingerprint: session_policy,
+            model: plan.version.model.clone(), provider: plan.version.provider.clone(),
+        })?;
+    }
     if let Some(tokens) = token_usage {
         app.store
             .record_attempt_usage(run_id, &attempt.id, tokens)?;
@@ -386,6 +424,8 @@ fn execute_prepared(
         StopReason::Cancelled => (RunState::Cancelled, "cancel_requested"),
         StopReason::TimedOut => (RunState::LimitReached, "wall_time_limit"),
         StopReason::Shutdown => (RunState::ReviewRequired, "runner_interrupted"),
+        StopReason::InvalidSession => (RunState::ReviewRequired, "session_identity_changed"),
+        StopReason::Exited if invalid_session => (RunState::ReviewRequired, "session_id_unavailable"),
         StopReason::Exited if log_failed => (RunState::Failed, "log_io_error"),
         StopReason::Exited if stdin_result.is_err() => (RunState::Failed, "input_failed"),
         StopReason::Exited
@@ -395,6 +435,7 @@ fn execute_prepared(
         {
             (RunState::ReviewRequired, "sandbox_denied")
         }
+        StopReason::Exited if !outcome.status.success() && events.retryable && !events.incomplete => (RunState::Failed, "agent_transient"),
         StopReason::Exited if !outcome.status.success() => (RunState::Failed, "agent_exit"),
         StopReason::Exited
             if execution
@@ -414,7 +455,8 @@ fn execute_prepared(
         StopReason::Exited => (RunState::Failed, "agent_exit"),
     };
     if !plan.version.tasks.is_empty() {
-        let (response, warnings, blocking) = task_result(&stdout);
+        let (response, mut warnings, blocking) = task_result(events.response.as_deref().unwrap_or(""));
+        if events.incomplete { warnings.push("info: agent_event_stream_incomplete".to_owned()); }
         let pause = next == RunState::Succeeded && (blocking
             || (plan.version.tasks[execution.record.task_index as usize].pause_on_warnings && !warnings.is_empty()));
         app.store.record_task_outcome(run_id,
@@ -664,6 +706,9 @@ fn prepare(
                 .unwrap_or_else(|| "agent_not_ready".to_owned()),
         ));
     }
+    if !plan.tasks.is_empty() && preflight.capabilities["session_resume"] != true {
+        return Ok(Preparation::ReviewRequired("session_resume_unsupported".to_owned()));
+    }
     let command = match agent
         .adapter()
         .command(&canonical.path, policy, plan.model.as_deref())
@@ -736,6 +781,7 @@ enum StopReason {
     Cancelled,
     TimedOut,
     Shutdown,
+    InvalidSession,
 }
 
 fn monitor(
@@ -747,8 +793,15 @@ fn monitor(
     log_path: &Path,
     shutdown: Option<&AtomicBool>,
     ownership_lost: &AtomicBool,
+    events: &Arc<Mutex<crate::agent_events::Events>>,
+    expected_session: Option<&str>,
 ) -> Result<ProcessOutcome> {
     loop {
+        if expected_session.is_some_and(|expected| events.lock().map(|events|
+            events.session_id.as_deref().is_some_and(|actual| actual != expected)).unwrap_or(true)) {
+            let status = supervisor.stop(STOP_GRACE_PERIOD).map_err(|source| io_error(log_path, source))?;
+            return Ok(ProcessOutcome { status, reason: StopReason::InvalidSession });
+        }
         if ownership_lost.load(Ordering::Acquire)
             || shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
             let status = supervisor
@@ -841,7 +894,7 @@ fn execution_prompt(plan: &PlanVersionRecord, task_index: u32) -> String {
 }
 
 fn task_result(stdout: &str) -> (String, Vec<String>, bool) {
-    let mut response = String::new();
+    let mut response = stdout.to_owned();
     let mut report = None;
     for line in stdout.lines() {
         if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {

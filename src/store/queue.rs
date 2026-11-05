@@ -122,7 +122,9 @@ fn blocked_by(
     provider_counts: &HashMap<String, usize>,
     endpoint_counts: &HashMap<String, usize>,
 ) -> Option<&'static str> {
-    if active_count >= usize::from(config.global) {
+    if run.ready_at.parse::<jiff::Timestamp>().map_or(true, |ready| ready > jiff::Timestamp::now()) {
+        Some("not_ready_yet")
+    } else if active_count >= usize::from(config.global) {
         Some("global_limit")
     } else if count_of(agent_counts, &run.agent_kind) >= usize::from(config.per_agent) {
         Some("agent_limit")

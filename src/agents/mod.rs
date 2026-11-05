@@ -80,6 +80,13 @@ pub trait AgentAdapter {
         model: Option<&str>,
     ) -> Result<AgentCommand>;
 
+    fn session_command(&self, workspace: &Path, policy: &WorkspacePolicy, model: Option<&str>, session_id: Option<&str>) -> Result<AgentCommand> {
+        if session_id.is_some() {
+            return Err(crate::error::ReactorError::InvalidInput("session resume unsupported".to_owned()));
+        }
+        self.command(workspace, policy, model)
+    }
+
     fn failure_requires_review(&self, output: &str) -> bool;
 
     fn token_usage(&self, output: &str) -> Option<u64>;

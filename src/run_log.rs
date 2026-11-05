@@ -82,16 +82,30 @@ impl RunLog {
 }
 
 pub fn capture(mut reader: impl Read, log: SharedRunLog) -> io::Result<Vec<u8>> {
+    capture_inner(&mut reader, log, None)
+}
+
+pub fn capture_agent(mut reader: impl Read, log: SharedRunLog, events: Arc<Mutex<crate::agent_events::Events>>) -> io::Result<Vec<u8>> {
+    capture_inner(&mut reader, log, Some(events))
+}
+
+fn capture_inner(reader: &mut impl Read, log: SharedRunLog, events: Option<Arc<Mutex<crate::agent_events::Events>>>) -> io::Result<Vec<u8>> {
     let mut buffer = [0_u8; 8 * 1024];
     let mut write_error = None;
     let mut tail = VecDeque::new();
     loop {
         let count = reader.read(&mut buffer)?;
         if count == 0 {
+            if let Some(events) = &events {
+                events.lock().map_err(|_| io::Error::other("event reader lock poisoned"))?.finish();
+            }
             return match write_error {
                 Some(error) => Err(error),
                 None => Ok(tail.into()),
             };
+        }
+        if let Some(events) = &events {
+            events.lock().map_err(|_| io::Error::other("event reader lock poisoned"))?.feed(&buffer[..count]);
         }
         tail.extend(&buffer[..count]);
         if tail.len() > CAPTURE_TAIL_BYTES {

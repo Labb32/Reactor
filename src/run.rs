@@ -10,6 +10,10 @@ pub struct AttemptRecord {
     pub process_started_at: Option<String>,
     #[serde(default)]
     pub process_identity: Option<String>,
+    #[serde(default)]
+    pub final_response: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
     pub exit_code: Option<i32>,

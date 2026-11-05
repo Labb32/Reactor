@@ -125,75 +125,19 @@ impl AgentAdapter for CodexAdapter {
                 "mcp": mcp_supported,
                 "hooks": hooks_supported,
                 "token_usage": true,
+                "session_resume": launcher.command(["exec", "resume", "--help"]).current_dir(workspace).bounded_output().map(|output| output.status.success()).unwrap_or(false),
                 "quota_reset": false,
                 "user_config_loaded": true
             }),
         })
     }
 
-    fn command(
-        &self,
-        workspace: &Path,
-        policy: &WorkspacePolicy,
-        model: Option<&str>,
-    ) -> Result<AgentCommand> {
-        let launcher = Launcher::find("codex").ok_or_else(|| {
-            crate::error::ReactorError::AgentUnavailable {
-                agent: "codex".to_owned(),
-                reason: "not_installed".to_owned(),
-            }
-        })?;
-        let mut arguments = Vec::new();
-        arguments.extend(
-            [
-                "--ask-for-approval",
-                "never",
-                "exec",
-                "--json",
-                "--ephemeral",
-                "--strict-config",
-                "--color",
-                "never",
-                "--sandbox",
-                "workspace-write",
-            ]
-            .into_iter()
-            .map(OsString::from),
-        );
-        arguments.push("--config".into());
-        arguments.push(
-            format!(
-                "sandbox_workspace_write.network_access={}",
-                policy.network.is_allowed()
-            )
-            .into(),
-        );
-        if !policy.mcp.is_allowed() {
-            arguments.push("--config".into());
-            arguments.push("mcp_servers={}".into());
-        }
-        if !policy.hooks.is_allowed() {
-            arguments.push("--disable".into());
-            arguments.push("hooks".into());
-        }
-        for root in &policy.writable_roots {
-            arguments.push("--add-dir".into());
-            arguments.push(root.into());
-        }
-        if let Some(model) = model {
-            arguments.push("--model".into());
-            arguments.push(model.into());
-        }
-        arguments.push("-C".into());
-        arguments.push(workspace.as_os_str().to_owned());
-        arguments.push("-".into());
-        let arguments = launcher.arguments(arguments);
-        Ok(AgentCommand {
-            program: launcher.program,
-            arguments,
-            environment: Vec::new(),
-            current_dir: workspace.to_owned(),
-        })
+    fn command(&self, workspace: &Path, policy: &WorkspacePolicy, model: Option<&str>) -> Result<AgentCommand> {
+        codex_command(workspace, policy, model, false, None)
+    }
+
+    fn session_command(&self, workspace: &Path, policy: &WorkspacePolicy, model: Option<&str>, session_id: Option<&str>) -> Result<AgentCommand> {
+        codex_command(workspace, policy, model, true, session_id)
     }
 
     fn failure_requires_review(&self, output: &str) -> bool {
@@ -301,4 +245,65 @@ fn failed_with_version(reason: &str, version: &Version) -> AgentPreflight {
             "minimum_version": MINIMUM_VERSION
         }),
     }
+}
+
+fn codex_command(workspace: &Path, policy: &WorkspacePolicy, model: Option<&str>, persistent: bool, session_id: Option<&str>) -> Result<AgentCommand> {
+        let launcher = Launcher::find("codex").ok_or_else(|| {
+            crate::error::ReactorError::AgentUnavailable {
+                agent: "codex".to_owned(),
+                reason: "not_installed".to_owned(),
+            }
+        })?;
+        let mut arguments = Vec::new();
+        arguments.extend(
+            [
+                "--ask-for-approval",
+                "never",
+                "exec",
+                "--json",
+                "--strict-config",
+                "--color",
+                "never",
+                "--sandbox",
+                "workspace-write",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        arguments.push("--config".into());
+        arguments.push(
+            format!(
+                "sandbox_workspace_write.network_access={}",
+                policy.network.is_allowed()
+            )
+            .into(),
+        );
+        if !policy.mcp.is_allowed() {
+            arguments.push("--config".into());
+            arguments.push("mcp_servers={}".into());
+        }
+        if !policy.hooks.is_allowed() {
+            arguments.push("--disable".into());
+            arguments.push("hooks".into());
+        }
+        for root in &policy.writable_roots {
+            arguments.push("--add-dir".into());
+            arguments.push(root.into());
+        }
+        if let Some(model) = model {
+            arguments.push("--model".into());
+            arguments.push(model.into());
+        }
+        arguments.push("-C".into());
+        arguments.push(workspace.as_os_str().to_owned());
+        if !persistent { arguments.push("--ephemeral".into()); }
+        if let Some(id) = session_id { arguments.push("resume".into()); arguments.push(id.into()); }
+        arguments.push("-".into());
+        let arguments = launcher.arguments(arguments);
+        Ok(AgentCommand {
+            program: launcher.program,
+            arguments,
+            environment: Vec::new(),
+            current_dir: workspace.to_owned(),
+        })
 }
