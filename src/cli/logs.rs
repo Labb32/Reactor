@@ -195,7 +195,7 @@ fn prune(format: OutputFormat) -> Result<()> {
     let paths = ReactorPaths::discover()?;
     let app = App::open(&paths)?;
     let root = paths.data_dir.join("runs");
-    crate::run_log::prune(&root).map_err(|source| io_error(&root, source))?;
+    crate::run_log::prune(&root, &app.store.protected_log_runs()?).map_err(|source| io_error(&root, source))?;
     match format {
         OutputFormat::Text => {
             println!("expired logs pruned");

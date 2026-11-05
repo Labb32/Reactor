@@ -41,9 +41,14 @@ pub fn execute_next(paths: &ReactorPaths, app: &mut App) -> Result<Option<RunRec
 }
 
 pub(crate) fn prepare_execution(paths: &ReactorPaths, app: &mut App) -> Result<()> {
+    for run_id in app.store.pending_deletions()? {
+        run_log::remove_run_directory(&paths.data_dir.join("runs"), &run_id).map_err(|error| io_error(&run_id, error))?;
+        checkpoint::remove_run_artifacts(paths, &run_id)?;
+        app.store.clear_run(&run_id)?;
+    }
     recover(paths, app)?;
     let runs_dir = paths.data_dir.join("runs");
-    run_log::prune(&runs_dir).map_err(|source| io_error(&runs_dir, source))?;
+    run_log::prune(&runs_dir, &app.store.protected_log_runs()?).map_err(|source| io_error(&runs_dir, source))?;
     Ok(())
 }
 
@@ -55,10 +60,11 @@ pub(crate) fn execute_available(
     if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
         return Ok(None);
     }
+    crate::storage::warn_log_size(&paths.data_dir.join("runs"));
     let owner_id = crate::ids::new_id();
     let Some(claimed) = app
         .store
-        .claim_next_run(&app.config.concurrency, &owner_id)?
+        .claim_next_run(&app.config.concurrency, &owner_id, paths)?
     else {
         return Ok(None);
     };
@@ -372,6 +378,7 @@ fn execute_prepared(
         ownership_lost,
         &events,
         expected_session,
+        &log,
     ) {
         Ok(outcome) => outcome,
         Err(_) => {
@@ -425,6 +432,7 @@ fn execute_prepared(
         StopReason::TimedOut => (RunState::LimitReached, "wall_time_limit"),
         StopReason::Shutdown => (RunState::ReviewRequired, "runner_interrupted"),
         StopReason::InvalidSession => (RunState::ReviewRequired, "session_identity_changed"),
+        StopReason::ArtifactFailure => (RunState::ReviewRequired, "artifact_io_error"),
         StopReason::Exited if invalid_session => (RunState::ReviewRequired, "session_id_unavailable"),
         StopReason::Exited if log_failed => (RunState::Failed, "log_io_error"),
         StopReason::Exited if stdin_result.is_err() => (RunState::Failed, "input_failed"),
@@ -782,6 +790,7 @@ enum StopReason {
     TimedOut,
     Shutdown,
     InvalidSession,
+    ArtifactFailure,
 }
 
 fn monitor(
@@ -795,8 +804,22 @@ fn monitor(
     ownership_lost: &AtomicBool,
     events: &Arc<Mutex<crate::agent_events::Events>>,
     expected_session: Option<&str>,
+    log: &run_log::SharedRunLog,
 ) -> Result<ProcessOutcome> {
+    let mut last_disk_check = Instant::now();
     loop {
+        if RunLog::failed(log) {
+            let status = supervisor.stop(STOP_GRACE_PERIOD).map_err(|source| io_error(log_path, source))?;
+            return Ok(ProcessOutcome { status, reason: StopReason::ArtifactFailure });
+        }
+        if last_disk_check.elapsed() >= Duration::from_secs(30) {
+            let run = app.store.get_run(run_id)?;
+            let mut roots = app.store.get_workspace(&run.workspace_id)?.write_paths();
+            roots.push(log_path.to_owned());
+            let _ = crate::storage::sufficient(&roots);
+            if let Some(root) = log_path.parent().and_then(Path::parent) { crate::storage::warn_log_size(root); }
+            last_disk_check = Instant::now();
+        }
         if expected_session.is_some_and(|expected| events.lock().map(|events|
             events.session_id.as_deref().is_some_and(|actual| actual != expected)).unwrap_or(true)) {
             let status = supervisor.stop(STOP_GRACE_PERIOD).map_err(|source| io_error(log_path, source))?;

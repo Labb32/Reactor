@@ -19,6 +19,7 @@ pub struct RunLog {
     path: PathBuf,
     file: Option<File>,
     size: u64,
+    failed: bool,
 }
 
 pub type SharedRunLog = Arc<Mutex<RunLog>>;
@@ -34,6 +35,7 @@ impl RunLog {
             path: path.to_owned(),
             file: Some(file),
             size: 0,
+            failed: false,
         })))
     }
 
@@ -48,6 +50,16 @@ impl RunLog {
     }
 
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let result = self.write_inner(bytes);
+        if result.is_err() { self.failed = true; }
+        result
+    }
+
+    pub fn failed(log: &SharedRunLog) -> bool {
+        log.lock().map(|log| log.failed).unwrap_or(true)
+    }
+
+    fn write_inner(&mut self, bytes: &[u8]) -> io::Result<()> {
         if self.size > 0 && self.size + bytes.len() as u64 > MAX_LOG_BYTES {
             self.rotate()?;
         }
@@ -90,12 +102,19 @@ pub fn capture_agent(mut reader: impl Read, log: SharedRunLog, events: Arc<Mutex
 }
 
 fn capture_inner(reader: &mut impl Read, log: SharedRunLog, events: Option<Arc<Mutex<crate::agent_events::Events>>>) -> io::Result<Vec<u8>> {
+    let mut redactor = crate::redact::Redactor::new();
     let mut buffer = [0_u8; 8 * 1024];
     let mut write_error = None;
     let mut tail = VecDeque::new();
     loop {
         let count = reader.read(&mut buffer)?;
         if count == 0 {
+            let remaining = redactor.push(&[], true);
+            if write_error.is_none() {
+                if let Err(error) = log.lock().map_err(|_| io::Error::other("log lock poisoned")).and_then(|mut log| log.write(&remaining)) {
+                    write_error = Some(error);
+                }
+            }
             if let Some(events) = &events {
                 events.lock().map_err(|_| io::Error::other("event reader lock poisoned"))?.finish();
             }
@@ -111,18 +130,19 @@ fn capture_inner(reader: &mut impl Read, log: SharedRunLog, events: Option<Arc<M
         if tail.len() > CAPTURE_TAIL_BYTES {
             tail.drain(..tail.len() - CAPTURE_TAIL_BYTES);
         }
+        let masked = redactor.push(&buffer[..count], false);
         if write_error.is_none()
             && let Err(error) = log
                 .lock()
                 .map_err(|_| io::Error::other("log writer lock was poisoned"))
-                .and_then(|mut log| log.write(&buffer[..count]))
+                .and_then(|mut log| log.write(&masked))
         {
             write_error = Some(error);
         }
     }
 }
 
-pub fn prune(root: &Path) -> io::Result<()> {
+pub fn prune(root: &Path, protected: &std::collections::HashSet<String>) -> io::Result<()> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -131,6 +151,7 @@ pub fn prune(root: &Path) -> io::Result<()> {
     let now = SystemTime::now();
     for entry in entries {
         let entry = entry?;
+        if protected.contains(&entry.file_name().to_string_lossy().into_owned()) { continue; }
         let file_type = entry.file_type()?;
         if !file_type.is_dir() || file_type.is_symlink() {
             continue;

@@ -33,10 +33,12 @@ impl Store {
     }
 
     pub(crate) fn record_task_outcome(&mut self, run_id: &str, state: &str, warnings: &[String], response: &str) -> Result<()> {
+        let response = crate::redact::text(response);
+        let warnings = warnings.iter().map(|warning| crate::redact::text(warning)).collect::<Vec<_>>();
         self.write_transaction(|tx| {
             let run = query_run(tx, run_id)?;
             tx.execute("UPDATE run_tasks SET state = ?1, warnings_json = ?2, response = ?3, updated_at = ?4 WHERE run_id = ?5 AND task_index = ?6",
-                params![state, serde_json::to_string(warnings).map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?, response, crate::time::now_utc(), run_id, run.task_index])?;
+                params![state, serde_json::to_string(&warnings).map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?, response, crate::time::now_utc(), run_id, run.task_index])?;
             if !matches!(state, "SUCCEEDED" | "WAITING_REVIEW") {
                 tx.execute("UPDATE run_tasks SET state = 'BLOCKED', updated_at = ?1 WHERE run_id = ?2 AND task_index > ?3",
                     params![crate::time::now_utc(), run_id, run.task_index])?;

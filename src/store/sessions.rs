@@ -14,7 +14,7 @@ pub struct WorkspaceSession {
 impl Store {
     pub(crate) fn record_agent_events(&mut self, attempt_id: &str, events: &crate::agent_events::Events) -> Result<()> {
         self.write_transaction(|tx| {
-            let value = serde_json::json!({"session_id": events.session_id, "response": events.response,
+            let value = serde_json::json!({"session_id": events.session_id, "response": events.response.as_deref().map(crate::redact::text),
                 "usage_complete": !events.incomplete, "tokens": events.tokens, "usage_seen": events.usage_seen}).to_string();
             tx.execute("INSERT INTO reactor_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 params![format!("events:{attempt_id}"), value])?;

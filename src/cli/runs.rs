@@ -378,7 +378,9 @@ fn clear(format: OutputFormat, arguments: &RunClearArgs) -> Result<()> {
                 "only a completed Run can be cleared".to_owned(),
             ));
         }
+        app.store.prepare_run_deletion(&run.id)?;
         clear_run_files(&paths, &run.id)?;
+        crate::checkpoint::remove_run_artifacts(&paths, &run.id)?;
         deleted_runs.push(app.store.clear_run(&run.id)?.id);
     }
     let deletion = RunDeletion { deleted_runs };
@@ -441,6 +443,10 @@ fn write_run_text(run: &RunRecord) -> Result<()> {
     println!("state: {}", output::display_status(&run.state));
     println!("workspace: {}", run.workspace_id);
     println!("plan: {} v{}", run.plan_id, run.plan_version);
+    for task in &run.tasks {
+        println!("task {}: {} {}", task.index + 1, output::escape_control(&task.id), task.state);
+        for warning in &task.warnings { println!("  {}", output::escape_control(warning)); }
+    }
     println!("created: {}", output::display_time(&run.created_at));
     println!("ready: {}", output::display_time(&run.ready_at));
     if let Some(attempt) = &run.attempt {

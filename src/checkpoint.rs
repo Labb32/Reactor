@@ -106,17 +106,20 @@ pub fn finish(paths: &ReactorPaths, run_id: &str, state: &str) -> Result<RunResu
         .collect::<Vec<_>>();
     let mut after = capture(run_id, &before.workspace_id, &roots)?;
     let completed_at = crate::time::now_utc();
-    let report = compare(&before, &after, state, &completed_at);
+    let mut report = compare(&before, &after, state, &completed_at);
+    for change in &mut report.changes {
+        if let Some(diff) = &mut change.unified_diff { *diff = crate::redact::text(diff); }
+    }
     after.remove_content();
 
     let manifest_path = paths
         .data_dir
         .join("manifests")
-        .join(format!("{}.json", before.workspace_id));
+        .join(format!("{run_id}.json"));
     let diff_path = paths
         .data_dir
         .join("diffs")
-        .join(format!("{}.json", before.workspace_id));
+        .join(format!("{run_id}.json"));
     write_json(&diff_path, &report)?;
     write_json(&manifest_path, &after)?;
 
@@ -158,6 +161,19 @@ pub fn read_diff(paths: &ReactorPaths, result: &RunResult) -> Result<DiffReport>
 
 pub fn pending_exists(paths: &ReactorPaths, run_id: &str) -> bool {
     crate::ids::is_safe_run_id(run_id) && pending_path(paths, run_id).is_file()
+}
+
+pub fn remove_run_artifacts(paths: &ReactorPaths, run_id: &str) -> Result<()> {
+    validate_run_id(run_id)?;
+    for path in [pending_path(paths, run_id), paths.data_dir.join("manifests").join(format!("{run_id}.json")), paths.data_dir.join("diffs").join(format!("{run_id}.json"))] {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => fs::remove_file(&path).map_err(|error| io_error(&path, error))?,
+            Ok(_) => return Err(ReactorError::InvalidStoredData("artifact deletion requires a regular file".to_owned())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(io_error(&path, error)),
+        }
+    }
+    Ok(())
 }
 
 pub fn pending_run_ids(paths: &ReactorPaths) -> Result<Vec<String>> {

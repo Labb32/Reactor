@@ -12,6 +12,27 @@ use crate::{
 const MAX_EVENT_CHANGED_FILES: usize = 100;
 
 impl Store {
+    pub fn protected_log_runs(&self) -> Result<std::collections::HashSet<String>> {
+        let mut statement = self.connection.prepare("SELECT r.id FROM runs r WHERE
+            r.state IN ('PREPARING', 'RUNNING', 'REVIEW_REQUIRED')
+            OR EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = r.id)
+            OR (r.state <> 'MISSED' AND NOT EXISTS(SELECT 1 FROM run_results WHERE run_id = r.id))")?;
+        Ok(statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn prepare_run_deletion(&mut self, run_id: &str) -> Result<()> {
+        self.write_transaction(|tx| {
+            ensure_deletable(tx, run_id)?;
+            tx.execute("INSERT OR IGNORE INTO reactor_meta (key, value) VALUES (?1, ?2)",
+                params![format!("deletion:{run_id}"), crate::time::now_utc()])?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn pending_deletions(&self) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare("SELECT substr(key, 10) FROM reactor_meta WHERE key LIKE 'deletion:%'")?;
+        Ok(statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
     pub fn record_log_deletion(&mut self, run_id: &str, deleted_files: usize) -> Result<()> {
         self.write_transaction(|transaction| {
             query_run(transaction, run_id)?;
@@ -423,13 +444,6 @@ impl Store {
             let summary = serde_json::to_string(result)
                 .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
             transaction.execute(
-                "DELETE FROM run_results
-                 WHERE run_id IN (
-                    SELECT id FROM runs WHERE workspace_id = ?1 AND id <> ?2
-                 )",
-                params![run.workspace_id, run_id],
-            )?;
-            transaction.execute(
                 "INSERT INTO run_results
                  (run_id, completed_at, manifest_path, diff_path, summary_json)
                  VALUES (?1, ?2, ?3, ?4, ?5)
@@ -617,6 +631,9 @@ pub(super) fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunR
 
 fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
     let source = query_run(transaction, run_id)?;
+    let deleting: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reactor_meta WHERE key = ?1)",
+        [format!("deletion:{run_id}")], |row| row.get(0))?;
+    if deleting { return Err(ReactorError::InvalidArgument("run deletion is pending".to_owned())); }
     if source.tasks.iter().any(|task| task.state == "WAITING_REVIEW") {
         return Err(ReactorError::InvalidArgument("acknowledge task warnings with run continue".to_owned()));
     }
@@ -725,6 +742,7 @@ pub(super) fn run_id_reserved(transaction: &Transaction<'_>, run_id: &str) -> Re
 }
 
 fn clear_run(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
+    ensure_deletable(transaction, run_id)?;
     let run = query_run(transaction, run_id)?;
     let state = parse_state(&run.state)?;
     if !state.can_clear(true) {
@@ -742,6 +760,7 @@ fn clear_run(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
         [run_id],
     )?;
     transaction.execute("DELETE FROM runs WHERE id = ?1", [run_id])?;
+    transaction.execute("DELETE FROM reactor_meta WHERE key = ?1", [format!("deletion:{run_id}")])?;
     write_event(
         transaction,
         "RUN_DELETED",
@@ -751,6 +770,18 @@ fn clear_run(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
         &now,
     )?;
     Ok(run)
+}
+
+fn ensure_deletable(connection: &Connection, run_id: &str) -> Result<()> {
+    let run = query_run(connection, run_id)?;
+    let busy: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run' AND resource_id = ?1)", [run_id], |row| row.get(0))?;
+    let referenced: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE retry_of = ?1)", [run_id], |row| row.get(0))?;
+    if busy || referenced || run.tasks.iter().any(|task| task.state == "WAITING_REVIEW")
+        || (run.result.is_none() && run.state != "MISSED")
+        || !parse_state(&run.state)?.is_terminal() {
+        return Err(ReactorError::InvalidArgument("run is active, protected, referenced, or awaiting result recovery".to_owned()));
+    }
+    Ok(())
 }
 
 pub(super) fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {

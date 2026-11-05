@@ -15,13 +15,19 @@ impl Store {
         &mut self,
         config: &ConcurrencyConfig,
         owner_id: &str,
+        paths: &crate::paths::ReactorPaths,
     ) -> Result<Option<QueueRun>> {
         self.write_transaction(|transaction| {
             super::schedules::refresh_due(transaction)?;
-            let selected = evaluate(transaction, config)?
-                .into_iter()
-                .filter(|run| run.eligible)
-                .min_by_key(|run| run.dispatch_order);
+            let mut candidates = evaluate(transaction, config)?;
+            candidates.sort_by_key(|run| run.dispatch_order);
+            let mut selected = None;
+            for run in candidates.into_iter().filter(|run| run.eligible) {
+                let workspace = super::workspaces::query_workspace(transaction, &run.workspace_id)?;
+                let mut roots = workspace.write_paths();
+                roots.extend([paths.data_dir.clone(), paths.config_dir.clone()]);
+                if crate::storage::sufficient(&roots) { selected = Some(run); break; }
+            }
             let Some(mut run) = selected else {
                 return Ok(None);
             };
