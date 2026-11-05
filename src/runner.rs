@@ -134,8 +134,10 @@ fn execute_claimed(
         app.store.release_run(run_id, owner_id)?;
         return Ok(run);
     }
+    let mut first_task = true;
     let run = loop {
-        crate::execution_control::set_timeout(Some(Duration::from_secs(600)));
+        if !first_task { crate::execution_control::set_timeout(Some(Duration::from_secs(600))); }
+        first_task = false;
         let run = execute_prepared(paths, app, execution, workspace.clone(), shutdown, ownership_lost)?;
         if run.state != "PREPARING" || ownership_lost.load(Ordering::Acquire) { break run; }
         execution = app.store.execution_run(run_id)?;
@@ -147,7 +149,7 @@ fn execute_claimed(
         app.store.release_run(run_id, owner_id)?;
         return Ok(run);
     }
-    crate::execution_control::set_timeout(Some(Duration::from_secs(60)));
+    crate::execution_control::collect_result();
     record_checkpoint_result(paths, app, &run)
 }
 
@@ -503,7 +505,7 @@ pub fn recover(paths: &ReactorPaths, app: &mut App) -> Result<Vec<RunRecord>> {
         let run = match app.store.get_run(&run_id) {
             Ok(run) => run,
             Err(ReactorError::RunNotFound(_)) => {
-                checkpoint::complete(paths, &run_id)?;
+                // Preserve orphan baselines for explicit operator recovery.
                 continue;
             }
             Err(error) => return Err(error),

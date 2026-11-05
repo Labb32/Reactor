@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 mod daemon;
+mod backup;
 mod logs;
 mod operations;
 mod plans;
@@ -50,6 +51,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Back up and restore Reactor's own settings, records and logs.
+    Backup(backup::BackupArgs),
     /// Show readiness, maintenance, storage and applied configuration.
     Status,
     /// Show read-only operating prerequisites without invoking Agent probes.
@@ -156,6 +159,7 @@ const CAPABILITIES: &[&str] = &[
 
 fn execute(cli: &Cli) -> Result<()> {
     match &cli.command {
+        Command::Backup(arguments) => backup::execute(cli.output, arguments),
         Command::Status | Command::Doctor => operations::status(cli.output),
         Command::Maintenance(arguments) => operations::maintenance(cli.output, arguments),
         Command::Init(arguments) => initialize(cli.output, arguments),

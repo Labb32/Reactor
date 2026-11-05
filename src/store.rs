@@ -61,6 +61,30 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn backup_database(&self, path: &Path) -> Result<()> {
+        self.ensure_supported_schema()?;
+        let value = path.to_str().ok_or_else(|| ReactorError::InvalidInput("backup path is not UTF-8".to_owned()))?;
+        self.connection.execute("VACUUM INTO ?1", [value])?;
+        crate::permissions::restrict_file(path).map_err(|error| crate::error::io_error(path, error))?;
+        Ok(())
+    }
+
+    pub(crate) fn prepare_restored_state(&mut self) -> Result<()> {
+        let check: String = self.connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        let invalid: i64 = self.connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
+        if check != "ok" || invalid != 0 { return Err(ReactorError::InvalidStoredData("backup database validation failed".to_owned())); }
+        self.write_transaction(|tx| {
+            tx.execute("DELETE FROM leases", [])?;
+            tx.execute("DELETE FROM reactor_meta WHERE key LIKE 'session:%' OR key LIKE 'deletion:%'", [])?;
+            tx.execute("INSERT OR REPLACE INTO reactor_meta (key, value) SELECT 'restore_block:' || id, ?1 FROM runs WHERE execution_path IS NOT NULL", [crate::time::now_utc()])?;
+            tx.execute("UPDATE runs SET state = 'REVIEW_REQUIRED' WHERE state IN ('WAITING', 'QUEUED', 'PREPARING', 'RUNNING')", [])?;
+            tx.execute("UPDATE run_tasks SET state = 'BLOCKED' WHERE state IN ('WAITING', 'RUNNING', 'WAITING_REVIEW')", [])?;
+            tx.execute("UPDATE workspaces SET status = 'REGISTERED'", [])?;
+            tx.execute("UPDATE workspace_agents SET status = 'UNPREPARED', policy_fingerprint = NULL, checked_at = NULL", [])?;
+            write_event(tx, "BACKUP_RESTORED", "reactor", "local", serde_json::json!({"automatic_execution": false}), &crate::time::now_utc())?;
+            Ok(())
+        })
+    }
     pub fn has_active_execution(&self) -> Result<bool> {
         Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE state IN ('PREPARING', 'RUNNING'))
             OR EXISTS(SELECT 1 FROM leases WHERE resource_type = 'run')", [], |row| row.get(0))?)

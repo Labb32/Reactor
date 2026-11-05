@@ -631,6 +631,9 @@ pub(super) fn cancel(transaction: &Transaction<'_>, run_id: &str) -> Result<RunR
 
 fn retry(transaction: &Transaction<'_>, run_id: &str) -> Result<RunRecord> {
     let source = query_run(transaction, run_id)?;
+    let restored: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reactor_meta WHERE key = ?1)",
+        [format!("restore_block:{run_id}")], |row| row.get(0))?;
+    if restored { return Err(ReactorError::InvalidArgument("restored occurrence has no backed-up execution workspace; start a new occurrence".to_owned())); }
     let deleting: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reactor_meta WHERE key = ?1)",
         [format!("deletion:{run_id}")], |row| row.get(0))?;
     if deleting { return Err(ReactorError::InvalidArgument("run deletion is pending".to_owned())); }

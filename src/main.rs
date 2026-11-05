@@ -1,6 +1,7 @@
 mod agents;
 mod agent_events;
 mod app;
+mod backup;
 mod checkpoint;
 mod cli;
 mod config;

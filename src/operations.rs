@@ -2,6 +2,21 @@ use std::{fs, io::Write, path::Path, thread, time::{Duration, Instant}};
 use serde::{Deserialize, Serialize};
 use crate::{app::App, error::{Result, ReactorError, io_error}, paths::ReactorPaths};
 
+pub struct AccessGuard(std::fs::File);
+impl AccessGuard {
+    pub fn acquire(paths: &ReactorPaths, exclusive: bool) -> Result<Self> {
+        let path = paths.data_dir.join("offline.lock");
+        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+            .open(&path).map_err(|error| io_error(&path, error))?;
+        crate::permissions::restrict_file(&path).map_err(|error| io_error(&path, error))?;
+        if !crate::daemon::platform::try_lock_mode(&file, exclusive).map_err(|error| io_error(&path, error))? {
+            return Err(ReactorError::InvalidInput("offline maintenance or another Reactor command is active".to_owned()));
+        }
+        Ok(Self(file))
+    }
+}
+impl Drop for AccessGuard { fn drop(&mut self) { let _ = crate::daemon::platform::unlock(&self.0); } }
+
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or_else(|| ReactorError::InvalidInput("file has no parent".to_owned()))?;
     fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
@@ -9,6 +24,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = crate::permissions::create_private_new_file(&temporary).map_err(|error| io_error(&temporary, error))?;
     file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|error| io_error(&temporary, error))?;
     drop(file);
+    replace_file(&temporary, path)
+}
+
+pub fn replace_file(temporary: &Path, path: &Path) -> Result<()> {
     #[cfg(not(windows))]
     fs::rename(&temporary, path).map_err(|error| io_error(path, error))?;
     #[cfg(windows)]
