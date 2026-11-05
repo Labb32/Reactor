@@ -27,13 +27,19 @@ impl PolicyAccess {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspacePolicy {
     pub writable_roots: Vec<String>,
     pub network: PolicyAccess,
     pub mcp: PolicyAccess,
     pub hooks: PolicyAccess,
+}
+
+impl Default for WorkspacePolicy {
+    fn default() -> Self {
+        Self { writable_roots: Vec::new(), network: PolicyAccess::Allow, mcp: PolicyAccess::Deny, hooks: PolicyAccess::Deny }
+    }
 }
 
 impl WorkspacePolicy {

@@ -523,6 +523,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    crate::execution_control::check().map_err(|error| io_error(path, error))?;
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| ReactorError::OutputSerialization(error.to_string()))?;
     let parent = path
@@ -542,6 +543,10 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
         return Err(io_error(&temporary, source));
     }
     drop(file);
+    if let Err(error) = crate::execution_control::check() {
+        let _ = fs::remove_file(&temporary);
+        return Err(io_error(path, error));
+    }
     if let Err(error) = replace(&temporary, path) {
         let _ = fs::remove_file(&temporary);
         return Err(error);

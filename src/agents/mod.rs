@@ -64,6 +64,23 @@ pub struct AgentCommand {
     pub current_dir: PathBuf,
 }
 
+/// Shared CLI login is intentional; unrelated daemon secrets are not inherited.
+pub fn environment(kind: Option<AgentKind>) -> Vec<(OsString, OsString)> {
+    let common = ["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
+        "HOME", "USER", "LOGNAME", "USERNAME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PSModulePath",
+        "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+        "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"];
+    let provider: &[&str] = match kind {
+        Some(AgentKind::Codex) => &["CODEX_HOME", "CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"],
+        Some(AgentKind::Claude) => &["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
+        Some(AgentKind::Qwen) => &["QWEN_HOME", "QWEN_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "GEMINI_API_KEY"],
+        None => &[],
+    };
+    common.iter().chain(provider.iter()).filter_map(|key| std::env::var_os(key).map(|value| (OsString::from(*key), value))).collect()
+}
+
 pub trait AgentAdapter {
     fn policy_files(&self) -> &'static [&'static str];
 

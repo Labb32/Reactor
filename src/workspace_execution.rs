@@ -67,6 +67,7 @@ pub fn prepare_worktree(paths: &ReactorPaths, run_id: &str, original: &Path) -> 
     if !crate::ids::is_safe_run_id(run_id) { return Err(ReactorError::InvalidInput("invalid Run ID".to_owned())); }
     let parent = paths.data_dir.join("worktrees");
     permissions::create_private_dir(&parent).map_err(|error| io_error(&parent, error))?;
+    let parent = dunce::canonicalize(&parent).map_err(|error| io_error(&parent, error))?;
     let target = parent.join(run_id);
     if target.exists() {
         return Err(ReactorError::InvalidInput("execution worktree already exists; explicit recovery required".to_owned()));

@@ -289,7 +289,7 @@ fn execute_prepared(
     if ownership_lost.load(Ordering::Acquire) {
         return Err(ReactorError::InvalidStoredData("run ownership lost before spawn".to_owned()));
     }
-    let command = process_command(&prepared.command);
+    let command = process_command(&prepared.command, prepared.agent);
     let mut supervisor = match ProcessSupervisor::spawn(command) {
         Ok(supervisor) => supervisor,
         Err(_) => {
@@ -775,9 +775,11 @@ fn runtime_workspace(
     })
 }
 
-fn process_command(agent: &AgentCommand) -> Command {
+fn process_command(agent: &AgentCommand, kind: AgentKind) -> Command {
     let mut command = Command::new(&agent.program);
     command
+        .env_clear()
+        .envs(crate::agents::environment(Some(kind)))
         .args(&agent.arguments)
         .envs(agent.environment.iter().map(|(key, value)| (key, value)))
         .current_dir(&agent.current_dir)

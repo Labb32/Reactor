@@ -188,7 +188,12 @@ mod platform {
 
         pub fn force_stop(&self) -> io::Result<()> {
             match self.process_id.get() {
-                Some(process_id) => signal_group(process_id, SIGKILL),
+                Some(process_id) => {
+                    signal_group(process_id, SIGKILL)?;
+                    // Do not signal a recycled process-group ID when this handle drops later.
+                    self.process_id.set(None);
+                    Ok(())
+                }
                 None => Ok(()),
             }
         }

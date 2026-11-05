@@ -106,7 +106,7 @@ struct PlanDraftArgs {
     #[arg(long)]
     model: Option<String>,
 
-    #[arg(long, default_value_t = 7_200)]
+    #[arg(long = "execution-timeout-seconds", alias = "max-wall-time-seconds", default_value_t = 7_200)]
     max_wall_time_seconds: u64,
 
     #[arg(long, default_value_t = 1)]

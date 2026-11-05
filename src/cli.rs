@@ -126,6 +126,12 @@ struct InfoData {
 }
 
 const CAPABILITIES: &[&str] = &[
+    "sequential_tasks",
+    "task_warning_gates",
+    "explicit_codex_sessions",
+    "runtime_maintenance",
+    "daemon_readiness",
+    "reactor_backup_restore",
     "versioned_json",
     "snapshot",
     "cursor_events",

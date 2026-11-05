@@ -11,6 +11,7 @@ impl BoundedOutput for Command {
         crate::execution_control::check()?;
         // Commands cannot be moved out of &mut self; reproduce the explicit invocation.
         let mut command = Command::new(self.get_program());
+        command.env_clear().envs(super::environment(None));
         command.args(self.get_args());
         if let Some(directory) = self.get_current_dir() { command.current_dir(directory); }
         for (key, value) in self.get_envs() {
@@ -61,6 +62,7 @@ impl BoundedOutput for Command {
 
 pub(super) struct Launcher {
     pub program: OsString,
+    environment: Vec<(OsString, OsString)>,
     #[cfg(windows)]
     script: Option<OsString>,
 }
@@ -72,6 +74,7 @@ impl Launcher {
         S: AsRef<std::ffi::OsStr>,
     {
         let mut command = Command::new(&self.program);
+        command.env_clear().envs(self.environment.iter().cloned());
         command.args(self.arguments(arguments));
         command
     }
@@ -88,6 +91,7 @@ impl Launcher {
     pub fn find(name: &str) -> Option<Self> {
         Some(Self {
             program: find_on_path(name)?,
+            environment: super::environment(super::AgentKind::parse(name)),
         })
     }
 
@@ -96,12 +100,14 @@ impl Launcher {
         if let Some(program) = find_on_path(&format!("{name}.exe")) {
             return Some(Self {
                 program,
+                environment: super::environment(super::AgentKind::parse(name)),
                 script: None,
             });
         }
         let script = find_on_path(&format!("{name}.ps1"))?;
         Some(Self {
             program: find_on_path("powershell.exe")?,
+            environment: super::environment(super::AgentKind::parse(name)),
             script: Some(script),
         })
     }

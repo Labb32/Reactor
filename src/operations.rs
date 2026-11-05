@@ -40,6 +40,10 @@ pub fn replace_file(temporary: &Path, path: &Path) -> Result<()> {
             return Err(io_error(path, std::io::Error::last_os_error()));
         }
     }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| io_error(parent, error))?;
+    }
     Ok(())
 }
 
