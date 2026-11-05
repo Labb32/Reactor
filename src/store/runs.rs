@@ -538,6 +538,16 @@ impl Store {
                     params![now, run_id],
                 )?;
                 transaction.execute(
+                    "UPDATE run_tasks SET state = 'REVIEW_REQUIRED', updated_at = ?1
+                     WHERE run_id = ?2 AND task_index = ?3 AND state IN ('WAITING', 'RUNNING')",
+                    params![now, run_id, run.task_index],
+                )?;
+                transaction.execute(
+                    "UPDATE run_tasks SET state = 'BLOCKED', updated_at = ?1
+                     WHERE run_id = ?2 AND task_index > ?3 AND state = 'WAITING'",
+                    params![now, run_id, run.task_index],
+                )?;
+                transaction.execute(
                     "UPDATE attempts SET ended_at = ?1, termination_reason = 'daemon_interrupted'
                      WHERE run_id = ?2 AND ended_at IS NULL",
                     params![now, run_id],
