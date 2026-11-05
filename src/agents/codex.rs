@@ -1,10 +1,11 @@
+use crate::process_supervisor::BoundedOutput;
 use std::{ffi::OsString, fs, path::Path, process::Command};
 
 use semver::Version;
 
 use crate::{
     agents::{
-        AgentAdapter, AgentCommand, AgentPreflight, launcher::{Launcher, BoundedOutput}, output_version,
+        AgentAdapter, AgentCommand, AgentPreflight, launcher::Launcher, output_version,
         sandbox_failure,
     },
     error::{Result, io_error},

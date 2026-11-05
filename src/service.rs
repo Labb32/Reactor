@@ -215,7 +215,7 @@ fn write_service_file(path: &Path, contents: &str) -> Result<()> {
 }
 
 fn run_checked(operation: &'static str, command: &mut Command) -> Result<()> {
-    use crate::agents::launcher::BoundedOutput;
+    use crate::process_supervisor::BoundedOutput;
     let output = command
         .bounded_output()
         .map_err(|source| service_error(operation, &source.to_string()))?;

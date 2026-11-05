@@ -63,7 +63,7 @@ pub fn validate_policy_files(original: &Path, execution: &Path, files: &[&str]) 
 
 /// Retained for the whole Plan occurrence; no Git publishing is performed here.
 pub fn prepare_worktree(paths: &ReactorPaths, run_id: &str, original: &Path) -> Result<PathBuf> {
-    use crate::agents::launcher::BoundedOutput;
+    use crate::process_supervisor::BoundedOutput;
     if !crate::ids::is_safe_run_id(run_id) { return Err(ReactorError::InvalidInput("invalid Run ID".to_owned())); }
     let parent = paths.data_dir.join("worktrees");
     permissions::create_private_dir(&parent).map_err(|error| io_error(&parent, error))?;
