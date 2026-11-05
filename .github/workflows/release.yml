@@ -63,6 +63,7 @@ jobs:
           mkdir -p "dist/$package"
           cp "target/${{ matrix.target }}/release/reactor" "dist/$package/"
           cp README.en.md LICENSE "dist/$package/"
+          cp -R docs "dist/$package/docs"
           tar -C dist -czf "dist/$package.tar.gz" "$package"
           (cd dist && shasum -a 256 "$package.tar.gz" > "$package.tar.gz.sha256")
           rm -rf "dist/$package"

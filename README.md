@@ -108,3 +108,5 @@ reactor events --after <cursor> --follow --output jsonl
 ## 라이선스
 
 [MIT License](LICENSE)를 적용합니다. 저작권 및 라이선스 고지를 유지하면 상업·비상업 목적의 사용, 수정, 재배포가 가능합니다.
+
+[Server operations](docs/OPERATIONS.md) | [Upgrade and rollback](docs/UPGRADE.md)

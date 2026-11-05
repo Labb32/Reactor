@@ -108,3 +108,5 @@ reactor events --after <cursor> --follow --output jsonl
 ## License
 
 Reactor is available under the [MIT License](LICENSE). Commercial and non-commercial use, modification, and redistribution are allowed when the copyright and license notice are preserved.
+
+[Server operations](docs/OPERATIONS.md) | [Upgrade and rollback](docs/UPGRADE.md)
