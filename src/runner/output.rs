@@ -1,4 +1,5 @@
-use super::*;
+use crate::plan::PlanVersionRecord;
+use std::{sync::mpsc, thread, time::Duration};
 
 pub(super) fn finish_capture(
     stdout: thread::JoinHandle<std::io::Result<Vec<u8>>>,
