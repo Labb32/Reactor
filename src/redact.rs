@@ -18,8 +18,9 @@ impl Redactor {
 
     pub fn push(&mut self, bytes: &[u8], final_chunk: bool) -> Vec<u8> {
         self.pending.extend_from_slice(bytes);
+        if self.secrets.is_empty() { return std::mem::take(&mut self.pending); }
         let cut = if final_chunk { self.pending.len() } else { self.pending.len().saturating_sub(self.overlap) };
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(cut);
         let mut offset = 0;
         while offset < cut {
             if let Some(secret) = self.secrets.iter().find(|secret| self.pending[offset..].starts_with(secret)) {
