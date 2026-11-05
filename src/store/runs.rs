@@ -12,6 +12,15 @@ use crate::{
 const MAX_EVENT_CHANGED_FILES: usize = 100;
 
 impl Store {
+    pub(crate) fn delay_retry(&mut self, run_id: &str, seconds: u32) -> Result<()> {
+        self.write_transaction(|tx| {
+            tx.execute("UPDATE runs SET ready_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1) WHERE id = ?2 AND state = 'QUEUED'",
+                params![format!("+{seconds} seconds"), run_id])?;
+            Ok(())
+        })
+    }
+
+
     pub fn protected_log_runs(&self) -> Result<std::collections::HashSet<String>> {
         let mut statement = self.connection.prepare("SELECT r.id FROM runs r WHERE
             r.state IN ('PREPARING', 'RUNNING', 'REVIEW_REQUIRED')

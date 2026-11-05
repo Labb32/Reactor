@@ -22,14 +22,6 @@ impl Store {
         })
     }
 
-    pub(crate) fn delay_retry(&mut self, run_id: &str, seconds: u32) -> Result<()> {
-        self.write_transaction(|tx| {
-            tx.execute("UPDATE runs SET ready_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1) WHERE id = ?2 AND state = 'QUEUED'",
-                params![format!("+{seconds} seconds"), run_id])?;
-            Ok(())
-        })
-    }
-
     pub fn workspace_session(&self, workspace_id: &str) -> Result<Option<WorkspaceSession>> {
         self.ensure_supported_schema()?;
         let value: Option<String> = self.connection.query_row("SELECT value FROM reactor_meta WHERE key = ?1",
