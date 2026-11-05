@@ -89,8 +89,8 @@ pub(crate) fn execute_available(
     );
     app.store.fence_execution(None);
     drop(budget);
-    if let Ok(run) = &result {
-        if run.state == "FAILED"
+    if let Ok(run) = &result
+        && run.state == "FAILED"
             && run.limits.max_attempts > 1
             && run
                 .attempt
@@ -102,7 +102,6 @@ pub(crate) fn execute_available(
             app.store
                 .delay_retry(&retry.id, if run.retry_of.is_none() { 60 } else { 300 })?;
         }
-    }
     result.map(Some)
 }
 
@@ -469,19 +468,10 @@ fn execute_prepared(
     let prompt = prepared.prompt;
     let stdin_thread = thread::spawn(move || stdin.write_all(prompt.as_bytes()));
     let started = Instant::now();
-    let outcome = match monitor(
-        app,
-        run_id,
-        &mut supervisor,
-        prepared.timeout,
-        started,
-        &log_path,
-        shutdown,
-        ownership_lost,
-        &events,
-        expected_session,
-        &log,
-    ) {
+    let outcome = match monitor(app, run_id, &mut supervisor, MonitorContext {
+        timeout: prepared.timeout, started, log_path: &log_path, shutdown, ownership_lost,
+        events: &events, expected_session, log: &log,
+    }) {
         Ok(outcome) => outcome,
         Err(_) => {
             let status = supervisor
@@ -961,19 +951,19 @@ enum StopReason {
     ArtifactFailure,
 }
 
-fn monitor(
-    app: &App,
-    run_id: &str,
-    supervisor: &mut ProcessSupervisor,
+struct MonitorContext<'a> {
     timeout: Duration,
     started: Instant,
-    log_path: &Path,
-    shutdown: Option<&AtomicBool>,
-    ownership_lost: &AtomicBool,
-    events: &Arc<Mutex<crate::agent_events::Events>>,
-    expected_session: Option<&str>,
-    log: &run_log::SharedRunLog,
-) -> Result<ProcessOutcome> {
+    log_path: &'a Path,
+    shutdown: Option<&'a AtomicBool>,
+    ownership_lost: &'a AtomicBool,
+    events: &'a Arc<Mutex<crate::agent_events::Events>>,
+    expected_session: Option<&'a str>,
+    log: &'a run_log::SharedRunLog,
+}
+
+fn monitor(app: &App, run_id: &str, supervisor: &mut ProcessSupervisor, context: MonitorContext<'_>) -> Result<ProcessOutcome> {
+    let MonitorContext { timeout, started, log_path, shutdown, ownership_lost, events, expected_session, log } = context;
     let mut last_disk_check = Instant::now();
     loop {
         if RunLog::failed(log) {

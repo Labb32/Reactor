@@ -374,7 +374,7 @@ fn clear(format: OutputFormat, arguments: &RunClearArgs) -> Result<()> {
                         run.id
                     ))
                 })?;
-                if created >= cutoff.clone() {
+                if created >= *cutoff {
                     continue;
                 }
             }

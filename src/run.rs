@@ -90,7 +90,7 @@ pub struct ExecutionRun {
 }
 
 pub enum BeginAttempt {
-    Started(AttemptRecord),
+    Started(Box<AttemptRecord>),
     CancelRequested,
     LimitReached,
 }

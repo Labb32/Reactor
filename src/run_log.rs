@@ -110,11 +110,10 @@ fn capture_inner(reader: &mut impl Read, log: SharedRunLog, events: Option<Arc<M
         let count = reader.read(&mut buffer)?;
         if count == 0 {
             let remaining = redactor.push(&[], true);
-            if write_error.is_none() {
-                if let Err(error) = log.lock().map_err(|_| io::Error::other("log lock poisoned")).and_then(|mut log| log.write(&remaining)) {
+            if write_error.is_none()
+                && let Err(error) = log.lock().map_err(|_| io::Error::other("log lock poisoned")).and_then(|mut log| log.write(&remaining)) {
                     write_error = Some(error);
                 }
-            }
             if let Some(events) = &events {
                 events.lock().map_err(|_| io::Error::other("event reader lock poisoned"))?.finish();
             }

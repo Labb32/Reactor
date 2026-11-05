@@ -11,9 +11,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    fs::{self, File},
-    io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    fs,
+    path::{Path, PathBuf},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,13 +187,12 @@ pub fn restore(paths: &ReactorPaths, directory: &Path, replace: bool) -> Result<
         }
         journal
     } else {
-        if let Ok(store) = Store::open_initialized(&paths.database_file()) {
-            if store.has_active_execution()? {
+        if let Ok(store) = Store::open_initialized(&paths.database_file())
+            && store.has_active_execution()? {
                 return Err(invalid(
                     "finish active execution and recovery before restore",
                 ));
             }
-        }
         let root = dunce::canonicalize(&paths.data_dir)
             .map_err(|error| io_error(&paths.data_dir, error))?;
         let id = crate::ids::new_id();

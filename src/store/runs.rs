@@ -246,7 +246,7 @@ impl Store {
                 }),
                 &attempt.started_at,
             )?;
-            Ok(BeginAttempt::Started(attempt))
+            Ok(BeginAttempt::Started(Box::new(attempt)))
         })
     }
 

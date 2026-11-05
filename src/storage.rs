@@ -54,11 +54,9 @@ pub fn log_bytes(root: &Path) -> std::io::Result<u64> {
 }
 
 pub fn warn_log_size(root: &Path) {
-    if due(&LAST_LOG_SCAN, 60) {
-        if let Ok(bytes) = log_bytes(root) {
-            if bytes >= LOG_WARNING { eprintln!("warning: retained Run logs exceed 5 GiB ({bytes} bytes)"); }
-        }
-    }
+    if due(&LAST_LOG_SCAN, 60)
+        && let Ok(bytes) = log_bytes(root)
+            && bytes >= LOG_WARNING { eprintln!("warning: retained Run logs exceed 5 GiB ({bytes} bytes)"); }
 }
 
 #[cfg(unix)]

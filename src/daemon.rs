@@ -8,7 +8,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::{
@@ -71,12 +71,11 @@ pub fn run(paths: ReactorPaths) -> Result<()> {
         }
     }
     let mut failure = None;
-    if !shutdown.load(Ordering::Acquire) {
-        if let Err(error) = readiness.ready() {
+    if !shutdown.load(Ordering::Acquire)
+        && let Err(error) = readiness.ready() {
             shutdown.store(true, Ordering::Release);
             failure = Some(error);
         }
-    }
     let mut remaining = spawned;
     while remaining > 0 {
         match receiver.recv_timeout(RECOVERY_INTERVAL) {
@@ -89,14 +88,13 @@ pub fn run(paths: ReactorPaths) -> Result<()> {
                 failure.get_or_insert(error);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if !shutdown.load(Ordering::Acquire) {
-                    if let Err(error) =
+                if !shutdown.load(Ordering::Acquire)
+                    && let Err(error) =
                         runner::recover(&paths, &mut app).and_then(|_| readiness.ready())
                     {
                         shutdown.store(true, Ordering::Release);
                         failure.get_or_insert(error);
                     }
-                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 shutdown.store(true, Ordering::Release);

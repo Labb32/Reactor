@@ -51,12 +51,12 @@ pub fn process_identity(process_id: u32) -> Option<String> {
         unsafe {
             CloseHandle(handle);
         }
-        return ok.then(|| {
+        ok.then(|| {
             format!(
                 "windows:{process_id}:{}:{}",
                 created.dwHighDateTime, created.dwLowDateTime
             )
-        });
+        })
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
@@ -374,8 +374,7 @@ mod platform {
         if snapshot == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let mut entry = THREADENTRY32::default();
-        entry.dwSize = size_of::<THREADENTRY32>() as u32;
+        let mut entry = THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
         let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
         let mut result = Err(io::Error::other("suspended child thread not found"));
         while found {

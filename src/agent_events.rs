@@ -102,21 +102,19 @@ pub fn task_result(stdout: &str) -> (String, Vec<String>, bool) {
     let mut report = None;
     for line in stdout.lines() {
         if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
-            if event["type"] == "item.completed" && event["item"]["type"] == "agent_message" {
-                if let Some(text) = event["item"]["text"].as_str() {
+            if event["type"] == "item.completed" && event["item"]["type"] == "agent_message"
+                && let Some(text) = event["item"]["text"].as_str() {
                     response = text.to_owned();
                 }
-            }
             if event.get("reactor_task_result").is_some() {
                 report = Some(event);
             }
         }
     }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) {
-        if value.get("reactor_task_result").is_some() {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&response)
+        && value.get("reactor_task_result").is_some() {
             report = Some(value);
         }
-    }
     let Some(report) = report else {
         return (response, Vec::new(), false);
     };
