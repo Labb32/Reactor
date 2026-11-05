@@ -9,6 +9,8 @@ mod daemon;
 mod domain;
 mod error;
 mod execution_control;
+mod file_lock;
+mod fs_support;
 mod ids;
 mod input;
 mod interrupt;

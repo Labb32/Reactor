@@ -36,7 +36,7 @@ fn save_registration(paths: &ReactorPaths, instance_id: &str, system: bool) -> R
     let bytes = serde_json::to_vec(&Registration { instance_id: instance_id.to_owned(), system })
         .map_err(|error| service_error("registration", &error.to_string()))?;
     let path = paths.config_dir.join("service-registration.json");
-    crate::operations::atomic_write(&path, &bytes)?;
+    crate::fs_support::atomic_write(&path, &bytes)?;
     #[cfg(unix)]
     { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).map_err(|error| io_error(&path, error))?; }
     Ok(())
@@ -82,7 +82,7 @@ pub fn install_system(paths: &ReactorPaths, instance_id: &str, user: &str) -> Re
         let unit = format!("[Unit]\nDescription=Reactor agent scheduler\nAfter=network-online.target\n\n[Service]\nType=simple\nUser={user}\nExecStart={} daemon run --config-dir {} --data-dir {}\nRestart=on-failure\nRestartSec=5\nKillMode=mixed\nTimeoutStopSec=35min\nNoNewPrivileges=true\n\n[Install]\nWantedBy=multi-user.target\n",
             quote(&executable)?, quote(&canonical_directory(&paths.config_dir)?)?, quote(&canonical_directory(&paths.data_dir)?)?);
         let path = PathBuf::from("/etc/systemd/system").join(format!("reactor-{instance_id}.service"));
-        crate::operations::atomic_write(&path, unit.as_bytes())?;
+        crate::fs_support::atomic_write(&path, unit.as_bytes())?;
         run_checked("install", Command::new("systemctl").arg("daemon-reload"))?;
         system_control("enable", instance_id)?;
         save_registration(paths, instance_id, true)?;

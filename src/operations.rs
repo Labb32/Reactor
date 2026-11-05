@@ -1,4 +1,5 @@
-use std::{fs, io::Write, path::Path, thread, time::{Duration, Instant}};
+use crate::fs_support::atomic_write;
+use std::{fs, thread, time::{Duration, Instant}};
 use serde::{Deserialize, Serialize};
 use crate::{app::App, error::{Result, ReactorError, io_error}, paths::ReactorPaths};
 
@@ -9,43 +10,13 @@ impl AccessGuard {
         let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
             .open(&path).map_err(|error| io_error(&path, error))?;
         crate::permissions::restrict_file(&path).map_err(|error| io_error(&path, error))?;
-        if !crate::daemon::platform::try_lock_mode(&file, exclusive).map_err(|error| io_error(&path, error))? {
+        if !crate::file_lock::try_lock_mode(&file, exclusive).map_err(|error| io_error(&path, error))? {
             return Err(ReactorError::InvalidInput("offline maintenance or another Reactor command is active".to_owned()));
         }
         Ok(Self(file))
     }
 }
-impl Drop for AccessGuard { fn drop(&mut self) { let _ = crate::daemon::platform::unlock(&self.0); } }
-
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| ReactorError::InvalidInput("file has no parent".to_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
-    let temporary = parent.join(format!(".{}.tmp", crate::ids::new_id()));
-    let mut file = crate::permissions::create_private_new_file(&temporary).map_err(|error| io_error(&temporary, error))?;
-    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|error| io_error(&temporary, error))?;
-    drop(file);
-    replace_file(&temporary, path)
-}
-
-pub fn replace_file(temporary: &Path, path: &Path) -> Result<()> {
-    #[cfg(not(windows))]
-    fs::rename(&temporary, path).map_err(|error| io_error(path, error))?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-        let from = temporary.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-        let to = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
-            return Err(io_error(path, std::io::Error::last_os_error()));
-        }
-    }
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| io_error(parent, error))?;
-    }
-    Ok(())
-}
+impl Drop for AccessGuard { fn drop(&mut self) { let _ = crate::file_lock::unlock(&self.0); } }
 
 pub fn maintenance(paths: &ReactorPaths) -> bool { paths.data_dir.join("maintenance.json").exists() }
 

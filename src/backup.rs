@@ -121,7 +121,7 @@ pub fn create(paths: &ReactorPaths, directory: &Path) -> Result<Manifest> {
     let manifest = Manifest { format: 1, schema: SUPPORTED_SCHEMA_VERSION, created_at: crate::time::now_utc(), files };
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| invalid(&error.to_string()))?;
     if bytes.len() > 16 * 1024 * 1024 { return Err(invalid("backup manifest exceeds 16 MiB")); }
-    operations::atomic_write(&directory.join("manifest.json"), &bytes)?;
+    crate::fs_support::atomic_write(&directory.join("manifest.json"), &bytes)?;
     Ok(manifest)
 }
 
@@ -152,7 +152,7 @@ fn archive_current(paths: &ReactorPaths, archive: &Path) -> Result<()> {
         if source.exists() { copy(&source, &archive.join(name))?; files.push(fingerprint(&archive.join(name), name.to_owned())?); }
     }
     copy_logs(paths, archive, &mut files)?;
-    operations::atomic_write(&archive.join("rollback.json"), &serde_json::to_vec(&files).map_err(|error| invalid(&error.to_string()))?)
+    crate::fs_support::atomic_write(&archive.join("rollback.json"), &serde_json::to_vec(&files).map_err(|error| invalid(&error.to_string()))?)
 }
 
 pub fn restore(paths: &ReactorPaths, directory: &Path, replace: bool) -> Result<serde_json::Value> {
@@ -192,7 +192,7 @@ pub fn restore(paths: &ReactorPaths, directory: &Path, replace: bool) -> Result<
         let files = manifest.files.iter().map(|entry| fingerprint(&stage.join(&entry.path), entry.path.clone())).collect::<Result<Vec<_>>>()?;
         archive_current(paths, &archive)?;
         let journal = RestoreJournal { source, manifest_hash, stage, archive, files };
-        operations::atomic_write(&journal_path, &serde_json::to_vec(&journal).map_err(|error| invalid(&error.to_string()))?)?;
+        crate::fs_support::atomic_write(&journal_path, &serde_json::to_vec(&journal).map_err(|error| invalid(&error.to_string()))?)?;
         journal
     };
     for entry in &journal.files {
@@ -229,7 +229,7 @@ pub fn restore(paths: &ReactorPaths, directory: &Path, replace: bool) -> Result<
         copy(&journal.stage.join(&entry.path), &temporary)?;
         let copied = fingerprint(&temporary, entry.path.clone())?;
         if copied.bytes != entry.bytes || copied.blake3 != entry.blake3 { return Err(invalid("restore copy checksum mismatch")); }
-        operations::replace_file(&temporary, &target)?;
+        crate::fs_support::replace_file(&temporary, &target)?;
     }
     operations::set_maintenance(paths, true)?;
     fs::remove_file(&journal_path).map_err(|error| io_error(&journal_path, error))?;

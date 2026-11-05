@@ -25,7 +25,7 @@ impl WorkspaceLocks {
             let file = OpenOptions::new().read(true).write(true).create(true).truncate(false)
                 .open(&path).map_err(|error| io_error(&path, error))?;
             permissions::restrict_file(&path).map_err(|error| io_error(&path, error))?;
-            if !crate::daemon::platform::try_lock_mode(&file, exclusive).map_err(|error| io_error(&path, error))? {
+            if !crate::file_lock::try_lock_mode(&file, exclusive).map_err(|error| io_error(&path, error))? {
                 return Err(ReactorError::InvalidInput("workspace write scope is occupied".to_owned()));
             }
             locks.0.push(file);
@@ -36,7 +36,7 @@ impl WorkspaceLocks {
 
 impl Drop for WorkspaceLocks {
     fn drop(&mut self) {
-        for file in &self.0 { let _ = crate::daemon::platform::unlock(file); }
+        for file in &self.0 { let _ = crate::file_lock::unlock(file); }
     }
 }
 
