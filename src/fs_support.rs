@@ -18,7 +18,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn replace_file(temporary: &Path, path: &Path) -> Result<()> {
     #[cfg(not(windows))]
-    fs::rename(&temporary, path).map_err(|error| io_error(path, error))?;
+    fs::rename(temporary, path).map_err(|error| io_error(path, error))?;
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;

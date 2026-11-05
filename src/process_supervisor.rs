@@ -23,13 +23,13 @@ pub fn process_identity(process_id: u32) -> Option<String> {
             .split_whitespace()
             .collect::<Vec<_>>();
         // /proc stat fields 5 (group) and 22 (kernel start ticks).
-        return Some(format!(
+        Some(format!(
             "linux:{}:{}:{}:{}",
             boot.trim(),
             process_id,
             fields.get(2)?,
             fields.get(19)?
-        ));
+        ))
     }
     #[cfg(windows)]
     {

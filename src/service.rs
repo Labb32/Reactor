@@ -86,7 +86,7 @@ pub fn install_system(paths: &ReactorPaths, instance_id: &str, user: &str) -> Re
         run_checked("install", Command::new("systemctl").arg("daemon-reload"))?;
         system_control("enable", instance_id)?;
         save_registration(paths, instance_id, true)?;
-        return status(paths, instance_id);
+        status(paths, instance_id)
     }
     #[cfg(not(target_os = "linux"))]
     { let _ = (paths, instance_id, user); Err(service_error("install", "system services require Linux")) }

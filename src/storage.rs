@@ -67,8 +67,9 @@ mod platform {
         let mut information = std::mem::MaybeUninit::<libc::statvfs>::uninit();
         if unsafe { libc::statvfs(path.as_ptr(), information.as_mut_ptr()) } != 0 { return Err(io::Error::last_os_error()); }
         let information = unsafe { information.assume_init() };
-        Ok(((information.f_bavail as u64).saturating_mul(information.f_frsize as u64),
-            (information.f_blocks as u64).saturating_mul(information.f_frsize as u64)))
+        let block_size = u128::from(information.f_frsize);
+        let bytes = |blocks: u128| u64::try_from(blocks.saturating_mul(block_size)).unwrap_or(u64::MAX);
+        Ok((bytes(u128::from(information.f_bavail)), bytes(u128::from(information.f_blocks))))
     }
 }
 
