@@ -858,6 +858,8 @@ fn ensure_deletable(connection: &Connection, run_id: &str) -> Result<()> {
 
 pub(super) fn query_run(connection: &Connection, run_id: &str) -> Result<RunRecord> {
     struct StoredRun {
+        task_index: u32,
+        execution_path: Option<String>,
         workspace_id: String,
         plan_id: String,
         plan_version: u32,
@@ -877,11 +879,13 @@ pub(super) fn query_run(connection: &Connection, run_id: &str) -> Result<RunReco
         .query_row(
             "SELECT workspace_id, plan_id, plan_version, occurrence_id, retry_of, state, agent_kind,
                     provider, local_endpoint, limits_snapshot_json, ready_at,
-                    cancel_requested_at, created_at, updated_at
+                    cancel_requested_at, created_at, updated_at, task_index, execution_path
              FROM runs WHERE id = ?1",
             [run_id],
             |row| {
                 Ok(StoredRun {
+                    task_index: row.get(14)?,
+                    execution_path: row.get(15)?,
                     workspace_id: row.get(0)?,
                     plan_id: row.get(1)?,
                     plan_version: row.get(2)?,
@@ -906,16 +910,8 @@ pub(super) fn query_run(connection: &Connection, run_id: &str) -> Result<RunReco
     let limits = serde_json::from_str::<PlanLimits>(&stored.limits_json)
         .map_err(|error| ReactorError::InvalidStoredData(error.to_string()))?;
     Ok(RunRecord {
-        task_index: connection.query_row(
-            "SELECT task_index FROM runs WHERE id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )?,
-        execution_path: connection.query_row(
-            "SELECT execution_path FROM runs WHERE id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )?,
+        task_index: stored.task_index,
+        execution_path: stored.execution_path,
         tasks: super::tasks::query_tasks(connection, run_id)?,
         id: run_id.to_owned(),
         workspace_id: stored.workspace_id,
