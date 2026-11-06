@@ -166,9 +166,9 @@ fn delete(format: OutputFormat, arguments: &LogRunArgs) -> Result<()> {
     let paths = ReactorPaths::discover()?;
     let mut app = App::open(&paths)?;
     let run = super::runs::resolve_run(&app, &arguments.run)?;
-    if matches!(run.state.as_str(), "PREPARING" | "RUNNING") {
+    if app.store.protected_log_runs()?.contains(&run.id) {
         return Err(ReactorError::InvalidArgument(
-            "logs for an active Run cannot be deleted".to_owned(),
+            "logs for a protected Run cannot be deleted".to_owned(),
         ));
     }
     let files = selected_log_files(&paths, &run, true)?;

@@ -295,6 +295,14 @@ fn codex_command(
         )
         .into(),
     );
+    for setting in [
+        "sandbox_workspace_write.exclude_slash_tmp=true",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "sandbox_workspace_write.writable_roots=[]",
+    ] {
+        arguments.push("--config".into());
+        arguments.push(setting.into());
+    }
     if !policy.mcp.is_allowed() {
         arguments.push("--config".into());
         arguments.push("mcp_servers={}".into());
